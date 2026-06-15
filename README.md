@@ -22,16 +22,19 @@ Open `http://localhost:8092/index.html` in a recent Chrome/Edge.
 
 ## Play online
 
-- **Single-player** is published to **GitHub Pages** automatically on every push
-  to `main` (see `.github/workflows/pages.yml`). Share the Pages URL and friends
-  can play in their browser — no install.
+**▶ Play now (single-player):** https://pilot123321.github.io/xwing-rogue-squadron/
+
+- **Single-player** is hosted on **GitHub Pages** from the `gh-pages` branch
+  (the contents of `web/`). To republish after changes: `npm run build` then
+  `git subtree push --prefix web origin gh-pages`. Share the URL — friends play
+  in the browser, no install.
 - **Multiplayer** (shared-space dogfight) needs the Node WebSocket server
   (`server.js`) running on a host that supports Node + WebSockets — e.g.
   [Render](https://render.com), [Railway](https://railway.app) or
-  [Fly.io](https://fly.io). Deploy the repo with start command `node server.js`
+  [Fly.io](https://fly.io). Deploy the repo with start command `npm start`
   (it serves the client **and** the socket on the same port). Everyone who opens
   that host's URL shares the same battle. The client auto-connects to its own
-  origin, so the Pages build is single-player; the Node-hosted build is
+  origin, so the Pages build is single-player; a Node-hosted build is
   multiplayer.
 
 ### Controls
