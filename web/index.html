@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>X-WING · Rogue Squadron</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: monospace; }
+    canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    #hud { pointer-events: none; }
+    #help {
+      position: absolute; left: 12px; top: 12px; color: #ffb627; font-size: 13px;
+      background: rgba(0,0,0,0.4); padding: 8px 10px; border: 1px solid #ffb627; line-height: 1.5;
+      pointer-events: none; max-width: 300px;
+    }
+    #splash {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      flex-direction: column; color: #ffe27a; background: rgba(0,0,0,0.82); text-align: center;
+    }
+    #splash h1 { font-size: 34px; letter-spacing: 6px; color: #ffb627; text-shadow: 0 0 18px #ffb62788; }
+    #splash p { opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <canvas id="hud"></canvas>
+  <div id="help">
+    <b>X-WING — flight controls</b><br>
+    W / S &nbsp; pitch (nose up / down)<br>
+    A / D &nbsp; roll &nbsp;&nbsp; Q / E &nbsp; yaw<br>
+    Shift / Ctrl &nbsp; throttle &nbsp;&nbsp; Z &nbsp; sublight accel<br>
+    Space &nbsp; fire lasers (hold)<br>
+    T &nbsp; lock TIE &nbsp; Y &nbsp; auto/manual target<br>
+    B &nbsp; air-to-ground laser-guided bomb<br>
+    X &nbsp; fold S-foils &nbsp; G &nbsp; flight assist<br>
+    L &nbsp; landing gear &nbsp; H &nbsp; VTOL hover<br>
+    V &nbsp; cockpit / chase view<br>
+    S-foils OPEN = agile. FOLDED = sublight + faster.<br>
+    Drag mouse = look around (360°). In cockpit,<br>
+    click the console buttons.<br>
+    Descend to the planet & land on a Rebel pad to<br>
+    repair + rearm. Fly to the Death Star trench (+X).<br>
+    Online: open this URL in another tab/PC to dogfight.<br>
+    Gamepad supported
+  </div>
+  <div id="splash">
+    <h1>X-WING</h1>
+    <p>Clear the sector. Destroy the TIE fighters.</p>
+    <p><b>Press any key or click to start</b></p>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    document.addEventListener("keydown", () => { const s = document.getElementById("splash"); if (s) s.style.display = "none"; }, { once: true });
+    document.addEventListener("pointerdown", () => { const s = document.getElementById("splash"); if (s) s.style.display = "none"; }, { once: true });
+  </script>
+  <script type="module" src="./dist/bundle.js"></script>
+</body>
+</html>

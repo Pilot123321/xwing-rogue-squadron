@@ -1,0 +1,24 @@
+{
+  "name": "xwing-rogue-squadron",
+  "version": "0.1.0",
+  "description": "Web-based arcade Star Wars X-wing space-combat game (Three.js, procedural). Includes a legacy tested F-16 6-DOF flight core.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "verify": "node test/verify.ts",
+    "test:flcs": "node test/flcs_test.ts",
+    "test": "node test/verify.ts && node test/flcs_test.ts",
+    "build": "esbuild src/web/main.ts --bundle --format=esm --outfile=web/dist/bundle.js --external:three --external:three/addons/*",
+    "serve": "npm run build && node server.js",
+    "start": "node server.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}
