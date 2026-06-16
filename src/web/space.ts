@@ -5,7 +5,7 @@
  */
 
 import * as THREE from "three";
-import { DS_CENTER, DS_Y } from "./surface.ts";
+import { DS_SPHERE_R, DS_SPHERE_CENTER, DS_TRENCH_W, DS_TRENCH_DEPTH } from "./surface.ts";
 
 export interface Space {
   group: THREE.Group;
@@ -37,40 +37,84 @@ export function buildSpace(): Space {
   stars.frustumCulled = false;
   group.add(stars);
 
+  // --- Distant sun: a bright far-away star along the directional-light vector,
+  // so the lighting on the ships reads as coming from this sun. ---
+  const sunDir = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+  const sunPos = sunDir.multiplyScalar(78000);
+  const sun = new THREE.Group();
+  // bright core
+  sun.add(new THREE.Mesh(new THREE.SphereGeometry(4200, 32, 24),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(8, 7.4, 6), toneMapped: false })));
+  // soft additive halo
+  sun.add(new THREE.Mesh(new THREE.SphereGeometry(8200, 32, 24),
+    new THREE.MeshBasicMaterial({ color: 0xfff0c0, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false })));
+  sun.add(new THREE.Mesh(new THREE.SphereGeometry(14000, 32, 24),
+    new THREE.MeshBasicMaterial({ color: 0xffe6a0, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending, depthWrite: false })));
+  sun.position.copy(sunPos);
+  group.add(sun);
+
   // (Blue backdrop planet removed.)
 
-  // --- Death Star: a real sphere sitting UNDER the landable trench, so the
-  // trench corridor reads as being cut into the Death Star's surface. ---
+  // --- Death Star: a solid grey sphere with an equatorial trench groove. ---
   const ds = new THREE.Group();
-  const dsR = 13000;
+  const dsR = DS_SPHERE_R;
+  // Matte grey (no emissive) so the sun lights it instead of it glowing white.
   const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(dsR, 64, 48),
-    new THREE.MeshStandardMaterial({ color: 0x9aa0a8, emissive: 0x101214, roughness: 0.85, metalness: 0.15 }),
+    new THREE.SphereGeometry(dsR, 96, 72),
+    new THREE.MeshStandardMaterial({ color: 0x8b9097, roughness: 0.95, metalness: 0.1 }),
   );
   ds.add(sphere);
-  // superlaser dish (recessed northern cap).
+
+  // Surface greebles: scattered panel boxes + a few craters, so it isn't a
+  // featureless ball.
+  const panelMat = new THREE.MeshStandardMaterial({ color: 0x7d828a, roughness: 0.9, metalness: 0.12 });
+  const craterMat = new THREE.MeshStandardMaterial({ color: 0x6f747b, roughness: 1.0, metalness: 0.08 });
+  for (let i = 0; i < 260; i++) {
+    const u = Math.random() * Math.PI * 2, v = Math.acos(2 * Math.random() - 1);
+    const dir = new THREE.Vector3(Math.sin(v) * Math.cos(u), Math.cos(v), Math.sin(v) * Math.sin(u));
+    if (Math.abs(dir.y) < 0.08) continue; // keep the equatorial trench band clear
+    const sz = 200 + Math.random() * 500;
+    const greeb = new THREE.Mesh(new THREE.BoxGeometry(sz, sz * (0.5 + Math.random()), 60 + Math.random() * 80), panelMat);
+    greeb.position.copy(dir).multiplyScalar(dsR - 20);
+    greeb.lookAt(0, 0, 0);
+    ds.add(greeb);
+  }
+  // superlaser dish (recessed northern crater).
   const dish = new THREE.Mesh(
-    new THREE.SphereGeometry(3000, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2.4),
-    new THREE.MeshStandardMaterial({ color: 0x70757c, roughness: 0.8 }),
-  );
-  dish.position.set(-4200, dsR * 0.62, -6000);
+    new THREE.SphereGeometry(3200, 32, 20, 0, Math.PI * 2, 0, Math.PI / 2.3), craterMat);
+  dish.position.set(-4600, dsR * 0.58, -6400);
   dish.rotation.x = Math.PI;
   ds.add(dish);
 
-  // One clean EQUATORIAL trench groove around the middle, splitting the sphere
-  // into two hemispheres (the iconic Death Star trench line).
-  const trenchMat = new THREE.MeshStandardMaterial({ color: 0x2c2f34, metalness: 0.5, roughness: 0.75 });
-  const trench = new THREE.Mesh(new THREE.TorusGeometry(dsR, 360, 20, 260), trenchMat);
-  trench.rotation.x = Math.PI / 2; // horizontal — wraps the equator
-  ds.add(trench);
-  // Thin bright seam line in the groove so it reads as a recessed channel.
-  const seam = new THREE.Mesh(new THREE.TorusGeometry(dsR + 8, 60, 8, 260),
-    new THREE.MeshStandardMaterial({ color: 0x14161a, metalness: 0.6, roughness: 0.6 }));
-  seam.rotation.x = Math.PI / 2;
-  ds.add(seam);
-  // Centre it so its top is just beneath the trench plateau (DS_Y), at the
-  // landable Death Star location — the trench slab now lies on the sphere.
-  ds.position.set(DS_CENTER.x, DS_Y - dsR + 60, DS_CENTER.y);
+  // Equatorial TRENCH: a recessed channel — a dark sunken floor torus flanked by
+  // two raised rim ribs, so it reads as a real cut, not a painted line.
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x202327, roughness: 0.85, metalness: 0.2 });
+  const rimMat = new THREE.MeshStandardMaterial({ color: 0x6b7077, roughness: 0.9, metalness: 0.15 });
+  const floor = new THREE.Mesh(new THREE.TorusGeometry(dsR - DS_TRENCH_DEPTH, DS_TRENCH_W, 16, 320), floorMat);
+  floor.rotation.x = Math.PI / 2;
+  ds.add(floor);
+  const edgeLight = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.4, 1.6, 2.2), toneMapped: false });
+  for (const side of [-1, 1]) {
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(dsR - 80, 180, 14, 320), rimMat);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = side * (DS_TRENCH_W + 130);
+    ds.add(rim);
+    // Bright running-light strip along each trench edge so the trench is visible.
+    const strip = new THREE.Mesh(new THREE.TorusGeometry(dsR - 40, 30, 8, 360), edgeLight);
+    strip.rotation.x = Math.PI / 2;
+    strip.position.y = side * (DS_TRENCH_W + 20);
+    ds.add(strip);
+  }
+  // greeble ribs along the trench walls
+  for (let i = 0; i < 160; i++) {
+    const a = (i / 160) * Math.PI * 2;
+    const rib = new THREE.Mesh(new THREE.BoxGeometry(120, DS_TRENCH_W * 2, 220), floorMat);
+    rib.position.set(Math.cos(a) * (dsR - DS_TRENCH_DEPTH * 0.4), 0, Math.sin(a) * (dsR - DS_TRENCH_DEPTH * 0.4));
+    rib.rotation.y = -a;
+    ds.add(rib);
+  }
+
+  ds.position.copy(DS_SPHERE_CENTER);
   group.add(ds);
 
   // --- Imperial Star Destroyer: long grey wedge ---

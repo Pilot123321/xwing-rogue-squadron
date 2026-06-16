@@ -801,13 +801,20 @@ function buildXWing() {
 var FORWARD2 = new THREE6.Vector3(0, 0, -1);
 var CRUISE_SPEED = 480;
 var MAX_SPEED = CRUISE_SPEED;
-var BOOST_SPEED = 1100;
 var VTOL_SPEED = 130;
 var MAIN_ACCEL = 70;
 var BOOST_ACCEL = 230;
 var RCS_LIN = 60;
 var ANG_ACCEL = new THREE6.Vector3(2.4, 1.4, 4.8);
 var MAX_RATE = new THREE6.Vector3(1.3, 0.85, 3);
+var DEG = Math.PI / 180;
+var ONSPEED_AOA = 8.1 * DEG;
+var STALL_AOA = 22 * DEG;
+var G_LIMIT = 7.5;
+var CORNER_SPEED = 300;
+var AIR_DRAG = 0.14;
+var DRAG_REF = 420;
+var G_ACCEL = 9.81;
 var PlayerShip = class {
   model;
   group;
@@ -821,6 +828,11 @@ var PlayerShip = class {
   gearDown = false;
   vtol = false;
   // vertical-thrust hover mode for landing / takeoff
+  // Atmospheric telemetry (valid when in air; for the HUD AoA/G cues).
+  aoaDeg = 0;
+  gLoad = 1;
+  stalled = false;
+  inAtmo = false;
   sfoils = 1;
   sfoilsTarget = 1;
   _nose = new THREE6.Vector3();
@@ -877,22 +889,39 @@ var PlayerShip = class {
   muzzles() {
     return this.model.cannonTips.map((p) => p.clone().applyQuaternion(this.group.quaternion).add(this.group.position));
   }
-  update(c, dt) {
+  update(c, dt, atmo = 0) {
     const wishX = -c.pitch, wishY = -c.yaw, wishZ = -c.roll;
     const wingsFolded = this.sfoils < 0.3;
     const boost = c.boost && wingsFolded;
     this.boosting = boost;
-    const agility = 0.5 + 0.5 * this.sfoils;
+    let agility = 0.5 + 0.5 * this.sfoils;
+    const sp0 = this.vel.length();
+    const noseS = this.forward(this._nose);
+    let aoa = 0;
+    if (sp0 > 5) aoa = Math.acos(Math.max(-1, Math.min(1, noseS.dot(this._v.copy(this.vel).divideScalar(sp0)))));
+    this.aoaDeg = aoa / DEG;
+    this.inAtmo = atmo > 0.02;
+    this.stalled = atmo > 0.1 && aoa > STALL_AOA && sp0 < CORNER_SPEED * 1.2;
+    let rateX = MAX_RATE.x, rateY = MAX_RATE.y;
+    if (atmo > 0) {
+      const speedF = Math.min(1, sp0 / CORNER_SPEED) * (this.stalled ? 0.25 : 1);
+      const gRate = G_LIMIT * G_ACCEL / Math.max(50, sp0);
+      const airX = Math.min(MAX_RATE.x, gRate) * speedF;
+      const airY = Math.min(MAX_RATE.y, gRate) * speedF;
+      rateX = MAX_RATE.x * (1 - atmo) + airX * atmo;
+      rateY = MAX_RATE.y * (1 - atmo) + airY * atmo;
+    }
     if (this.flightAssist) {
       const k = 1 - Math.exp(-dt * 7);
-      this.angVel.x += (wishX * MAX_RATE.x * agility - this.angVel.x) * k;
-      this.angVel.y += (wishY * MAX_RATE.y * agility - this.angVel.y) * k;
+      this.angVel.x += (wishX * rateX * agility - this.angVel.x) * k;
+      this.angVel.y += (wishY * rateY * agility - this.angVel.y) * k;
       this.angVel.z += (wishZ * MAX_RATE.z * agility - this.angVel.z) * k;
     } else {
       this.angVel.x += wishX * ANG_ACCEL.x * agility * dt;
       this.angVel.y += wishY * ANG_ACCEL.y * agility * dt;
       this.angVel.z += wishZ * ANG_ACCEL.z * agility * dt;
     }
+    this.gLoad = 1 + Math.hypot(this.angVel.x, this.angVel.y) * sp0 / G_ACCEL;
     const w = this.angVel.length();
     if (w > 1e-6) {
       this._axis.copy(this.angVel).multiplyScalar(1 / w);
@@ -906,16 +935,30 @@ var PlayerShip = class {
       const maxDV = (MAIN_ACCEL + RCS_LIN) * dt;
       if (dv.length() > maxDV) dv.setLength(maxDV);
       this.vel.add(dv);
-    } else if (this.flightAssist) {
+    } else {
+      const sp = this.vel.length();
+      let alignRate = 0;
+      if (atmo > 0) {
+        const liftAuth = Math.min(1, sp / CORNER_SPEED) * (this.stalled ? 0.12 : 1);
+        alignRate = 3.2 * liftAuth;
+        if (this.flightAssist) alignRate = Math.max(alignRate, 1);
+      } else if (this.flightAssist) {
+        alignRate = 2.6;
+      }
+      if (sp > 1 && alignRate > 0) {
+        const dir = this._v.copy(this.vel).divideScalar(sp).lerp(nose, 1 - Math.exp(-dt * alignRate)).normalize();
+        this.vel.copy(dir).multiplyScalar(sp);
+      }
       const accel = boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL;
       this.vel.addScaledVector(nose, accel * dt);
-      const cap = boost ? BOOST_SPEED : CRUISE_SPEED;
-      const sp = this.vel.length();
-      if (sp > cap) this.vel.multiplyScalar(cap / sp);
-      if (!boost && c.throttle < 0.05) this.vel.multiplyScalar(Math.max(0, 1 - 1.4 * dt));
-    } else {
-      const a = boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL;
-      this.vel.addScaledVector(nose, a * dt);
+      const sp2 = this.vel.length();
+      if (atmo > 0) {
+        const drag = AIR_DRAG * atmo * (sp2 / DRAG_REF);
+        this.vel.multiplyScalar(Math.max(0, 1 - drag * dt));
+      } else if (this.flightAssist && !boost) {
+        const cap = CRUISE_SPEED * 1.03;
+        if (sp2 > cap) this.vel.multiplyScalar(cap / sp2);
+      }
     }
     this.group.position.addScaledVector(this.vel, dt);
     this.sfoils += (this.sfoilsTarget - this.sfoils) * (1 - Math.exp(-dt * 6));
@@ -932,9 +975,13 @@ import * as THREE7 from "three";
 var PLANET_CENTER = new THREE7.Vector2(0, 0);
 var PLANET_RADIUS = 15500;
 var PLANET_Y = -2600;
-var DS_CENTER = new THREE7.Vector2(52e3, 0);
+var DS_CENTER = new THREE7.Vector2(3e4, 0);
 var DS_RADIUS = 11e3;
 var DS_Y = -2600;
+var DS_SPHERE_R = 13e3;
+var DS_SPHERE_CENTER = new THREE7.Vector3(DS_CENTER.x, -300, DS_CENTER.y);
+var DS_TRENCH_W = 750;
+var DS_TRENCH_DEPTH = 1900;
 var BASE_POS = new THREE7.Vector3(0, PLANET_Y, 2600);
 var EXHAUST_PORT = new THREE7.Vector3(DS_CENTER.x + 7e3, DS_Y - 1440, DS_CENTER.y);
 function planetFbm(x, z) {
@@ -942,6 +989,7 @@ function planetFbm(x, z) {
 }
 var PLANET_R = 9e3;
 var PLANET_CY = PLANET_Y - PLANET_R;
+var ATMO_THICKNESS = 1500;
 function planetHeight(x, z) {
   const d = Math.hypot(x - PLANET_CENTER.x, z - PLANET_CENTER.y);
   if (d >= PLANET_R) return PLANET_CY;
@@ -1000,6 +1048,19 @@ function buildSurface() {
   );
   planet.position.set(PLANET_CENTER.x, PLANET_CY, PLANET_CENTER.y);
   group.add(planet);
+  const atmo = new THREE7.Mesh(
+    new THREE7.SphereGeometry(PLANET_R + ATMO_THICKNESS, 64, 48),
+    new THREE7.MeshBasicMaterial({
+      color: 5939455,
+      transparent: true,
+      opacity: 0.06,
+      side: THREE7.BackSide,
+      depthWrite: false,
+      blending: THREE7.AdditiveBlending
+    })
+  );
+  atmo.position.set(PLANET_CENTER.x, PLANET_CY, PLANET_CENTER.y);
+  group.add(atmo);
   const apronY = PLANET_CY + Math.sqrt(PLANET_R * PLANET_R - (BASE_POS.x * BASE_POS.x + BASE_POS.z * BASE_POS.z));
   const baseMetal = new THREE7.MeshStandardMaterial({ color: 9080985, metalness: 0.5, roughness: 0.5 });
   const baseDark = new THREE7.MeshStandardMaterial({ color: 4474958, metalness: 0.6, roughness: 0.5 });
@@ -1067,31 +1128,73 @@ function buildSpace() {
   const stars = new THREE8.Points(sg, new THREE8.PointsMaterial({ size: 220, vertexColors: true, sizeAttenuation: true }));
   stars.frustumCulled = false;
   group.add(stars);
+  const sunDir = new THREE8.Vector3(0.5, 0.8, 0.3).normalize();
+  const sunPos = sunDir.multiplyScalar(78e3);
+  const sun = new THREE8.Group();
+  sun.add(new THREE8.Mesh(
+    new THREE8.SphereGeometry(4200, 32, 24),
+    new THREE8.MeshBasicMaterial({ color: new THREE8.Color(8, 7.4, 6), toneMapped: false })
+  ));
+  sun.add(new THREE8.Mesh(
+    new THREE8.SphereGeometry(8200, 32, 24),
+    new THREE8.MeshBasicMaterial({ color: 16773312, transparent: true, opacity: 0.28, blending: THREE8.AdditiveBlending, depthWrite: false })
+  ));
+  sun.add(new THREE8.Mesh(
+    new THREE8.SphereGeometry(14e3, 32, 24),
+    new THREE8.MeshBasicMaterial({ color: 16770720, transparent: true, opacity: 0.12, blending: THREE8.AdditiveBlending, depthWrite: false })
+  ));
+  sun.position.copy(sunPos);
+  group.add(sun);
   const ds = new THREE8.Group();
-  const dsR = 13e3;
+  const dsR = DS_SPHERE_R;
   const sphere = new THREE8.Mesh(
-    new THREE8.SphereGeometry(dsR, 64, 48),
-    new THREE8.MeshStandardMaterial({ color: 10133672, emissive: 1053204, roughness: 0.85, metalness: 0.15 })
+    new THREE8.SphereGeometry(dsR, 96, 72),
+    new THREE8.MeshStandardMaterial({ color: 9146519, roughness: 0.95, metalness: 0.1 })
   );
   ds.add(sphere);
+  const panelMat = new THREE8.MeshStandardMaterial({ color: 8225418, roughness: 0.9, metalness: 0.12 });
+  const craterMat = new THREE8.MeshStandardMaterial({ color: 7304315, roughness: 1, metalness: 0.08 });
+  for (let i = 0; i < 260; i++) {
+    const u = Math.random() * Math.PI * 2, v = Math.acos(2 * Math.random() - 1);
+    const dir = new THREE8.Vector3(Math.sin(v) * Math.cos(u), Math.cos(v), Math.sin(v) * Math.sin(u));
+    if (Math.abs(dir.y) < 0.08) continue;
+    const sz = 200 + Math.random() * 500;
+    const greeb = new THREE8.Mesh(new THREE8.BoxGeometry(sz, sz * (0.5 + Math.random()), 60 + Math.random() * 80), panelMat);
+    greeb.position.copy(dir).multiplyScalar(dsR - 20);
+    greeb.lookAt(0, 0, 0);
+    ds.add(greeb);
+  }
   const dish = new THREE8.Mesh(
-    new THREE8.SphereGeometry(3e3, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2.4),
-    new THREE8.MeshStandardMaterial({ color: 7370108, roughness: 0.8 })
+    new THREE8.SphereGeometry(3200, 32, 20, 0, Math.PI * 2, 0, Math.PI / 2.3),
+    craterMat
   );
-  dish.position.set(-4200, dsR * 0.62, -6e3);
+  dish.position.set(-4600, dsR * 0.58, -6400);
   dish.rotation.x = Math.PI;
   ds.add(dish);
-  const trenchMat = new THREE8.MeshStandardMaterial({ color: 2895668, metalness: 0.5, roughness: 0.75 });
-  const trench = new THREE8.Mesh(new THREE8.TorusGeometry(dsR, 360, 20, 260), trenchMat);
-  trench.rotation.x = Math.PI / 2;
-  ds.add(trench);
-  const seam = new THREE8.Mesh(
-    new THREE8.TorusGeometry(dsR + 8, 60, 8, 260),
-    new THREE8.MeshStandardMaterial({ color: 1316378, metalness: 0.6, roughness: 0.6 })
-  );
-  seam.rotation.x = Math.PI / 2;
-  ds.add(seam);
-  ds.position.set(DS_CENTER.x, DS_Y - dsR + 60, DS_CENTER.y);
+  const floorMat = new THREE8.MeshStandardMaterial({ color: 2106151, roughness: 0.85, metalness: 0.2 });
+  const rimMat = new THREE8.MeshStandardMaterial({ color: 7041143, roughness: 0.9, metalness: 0.15 });
+  const floor = new THREE8.Mesh(new THREE8.TorusGeometry(dsR - DS_TRENCH_DEPTH, DS_TRENCH_W, 16, 320), floorMat);
+  floor.rotation.x = Math.PI / 2;
+  ds.add(floor);
+  const edgeLight = new THREE8.MeshBasicMaterial({ color: new THREE8.Color(0.4, 1.6, 2.2), toneMapped: false });
+  for (const side of [-1, 1]) {
+    const rim = new THREE8.Mesh(new THREE8.TorusGeometry(dsR - 80, 180, 14, 320), rimMat);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = side * (DS_TRENCH_W + 130);
+    ds.add(rim);
+    const strip = new THREE8.Mesh(new THREE8.TorusGeometry(dsR - 40, 30, 8, 360), edgeLight);
+    strip.rotation.x = Math.PI / 2;
+    strip.position.y = side * (DS_TRENCH_W + 20);
+    ds.add(strip);
+  }
+  for (let i = 0; i < 160; i++) {
+    const a = i / 160 * Math.PI * 2;
+    const rib = new THREE8.Mesh(new THREE8.BoxGeometry(120, DS_TRENCH_W * 2, 220), floorMat);
+    rib.position.set(Math.cos(a) * (dsR - DS_TRENCH_DEPTH * 0.4), 0, Math.sin(a) * (dsR - DS_TRENCH_DEPTH * 0.4));
+    rib.rotation.y = -a;
+    ds.add(rib);
+  }
+  ds.position.copy(DS_SPHERE_CENTER);
   group.add(ds);
   const isd = buildStarDestroyer();
   isd.position.set(0, -1200, -9e3);
@@ -1202,12 +1305,8 @@ function buildCockpit() {
   sill.rotation.x = Math.PI / 2;
   sill.scale.set(1, 1.7, 1);
   group.add(sill);
-  const hood = new THREE9.Mesh(new THREE9.BoxGeometry(2.7, 0.18, 0.55), FRAME);
-  hood.position.set(0, 0.86, -2.42);
-  hood.rotation.x = -0.25;
-  group.add(hood);
-  const panel = new THREE9.Mesh(new THREE9.BoxGeometry(2.7, 1.1, 0.14), PANEL3);
-  panel.position.set(0, 0.05, -2.36);
+  const panel = new THREE9.Mesh(new THREE9.BoxGeometry(2.7, 1.3, 0.14), PANEL3);
+  panel.position.set(0, -0.05, -2.36);
   panel.rotation.x = -0.5;
   group.add(panel);
   const scopeCanvas = document.createElement("canvas");
@@ -1267,9 +1366,8 @@ function buildCockpit() {
     group.add(fill);
     return fill;
   };
-  const shieldBar = mkBar(-0.16, 4643071);
-  const hullBar = mkBar(0, 6160250);
-  const thrBar = mkBar(0.16, 16758311);
+  const hullBar = mkBar(-0.98, 6160250);
+  const thrBar = mkBar(-0.84, 16758311);
   const stick = new THREE9.Mesh(new THREE9.CylinderGeometry(0.04, 0.055, 0.6, 20), TRIM);
   stick.position.set(0, -0.1, -1.45);
   group.add(stick);
@@ -1282,71 +1380,46 @@ function buildCockpit() {
     pedal.rotation.x = -0.9;
     group.add(pedal);
   }
-  const LEFT_BTNS = [
-    ["SFOIL", "S-FOIL"],
-    ["ASSIST", "ASSIST"],
-    ["TARGET", "TARGET"]
-  ];
-  const RIGHT_BTNS = [
-    ["VIEW", "VIEW"],
-    ["GEAR", "GEAR"],
-    ["BOMB", "A/G BOMB"],
-    ["AUTO", "AUTO TGT"]
-  ];
   const buttons = [];
   const lights = /* @__PURE__ */ new Map();
   const bodies = /* @__PURE__ */ new Map();
   const pressUntil = /* @__PURE__ */ new Map();
-  const mkButton = (id, label, side, i) => {
+  const mkButton = (id, label, col, row) => {
     const bg = new THREE9.Group();
     const body = new THREE9.Mesh(
-      new THREE9.BoxGeometry(0.26, 0.16, 0.07),
-      new THREE9.MeshStandardMaterial({ color: 2764340, roughness: 0.6, metalness: 0.35 })
+      new THREE9.BoxGeometry(0.26, 0.2, 0.08),
+      new THREE9.MeshStandardMaterial({ color: 2895926, roughness: 0.55, metalness: 0.4 })
     );
     body.userData.cockpitButton = id;
     bg.add(body);
     const lab = new THREE9.Mesh(
-      new THREE9.PlaneGeometry(0.24, 0.09),
+      new THREE9.PlaneGeometry(0.24, 0.12),
       new THREE9.MeshBasicMaterial({ map: makeLabel(label) })
     );
-    lab.position.z = 0.04;
+    lab.position.z = 0.045;
     bg.add(lab);
     const light = new THREE9.Mesh(
-      new THREE9.BoxGeometry(0.22, 0.026, 0.075),
-      new THREE9.MeshStandardMaterial({ color: 2245666, emissive: 0 })
+      new THREE9.PlaneGeometry(0.2, 0.025),
+      new THREE9.MeshBasicMaterial({ color: 2245666 })
     );
-    light.position.y = 0.095;
+    light.position.set(0, -0.07, 0.046);
     bg.add(light);
-    bg.position.set(side * 1.16, 0.5, -1.6 + i * 0.32);
-    bg.rotation.set(-1.05, 0, side * 0.16);
+    bg.position.set(-0.36 + col * 0.36, -0.16 - row * 0.26, -2.06 + row * 0.12);
+    bg.rotation.x = -0.5;
     group.add(bg);
     buttons.push({ id, mesh: body });
     lights.set(id, light);
     bodies.set(id, body);
   };
-  LEFT_BTNS.forEach(([id, label], i) => mkButton(id, label, -1, i));
-  RIGHT_BTNS.forEach(([id, label], i) => mkButton(id, label, 1, i));
-  const buildSidePanel = (side) => {
-    const g = new THREE9.Group();
-    const back = new THREE9.Mesh(new THREE9.BoxGeometry(0.44, 0.66, 0.04), PANEL3);
-    g.add(back);
-    const screen = new THREE9.Mesh(
-      new THREE9.PlaneGeometry(0.34, 0.4),
-      new THREE9.MeshBasicMaterial({ color: side < 0 ? 797210 : 469050 })
-    );
-    screen.position.set(0, 0.04, 0.03);
-    g.add(screen);
-    for (let r = 0; r < 4; r++) {
-      const row = new THREE9.Mesh(new THREE9.PlaneGeometry(0.26, 0.03), litPanel(side < 0 ? 3407752 : 4643071));
-      row.position.set(0, 0.15 - r * 0.08, 0.04);
-      g.add(row);
-    }
-    g.position.set(side * 0.82, 0.16, -0.35);
-    g.rotation.set(-Math.PI / 2, 0, side * 0.1);
-    return g;
-  };
-  group.add(buildSidePanel(-1));
-  group.add(buildSidePanel(1));
+  const BANK = [
+    ["SFOIL", "S-FOIL"],
+    ["ASSIST", "ASSIST"],
+    ["TARGET", "TARGET"],
+    ["AUTO", "AUTO"],
+    ["BOMB", "BOMB"],
+    ["VIEW", "VIEW"]
+  ];
+  BANK.forEach(([id, label], i) => mkButton(id, label, i % 3, Math.floor(i / 3)));
   const fireRing = new THREE9.Mesh(
     new THREE9.TorusGeometry(0.07, 0.018, 12, 28),
     new THREE9.MeshStandardMaterial({ color: 2237480, metalness: 0.6, roughness: 0.4 })
@@ -1401,7 +1474,7 @@ function buildCockpit() {
   vtolPtr.position.z = 0.02;
   vtolPtr.rotation.z = 1;
   vtolDial.add(vtolPtr);
-  vtolDial.position.set(0.44, -0.08, -2.24);
+  vtolDial.position.set(0.92, -0.14, -2.18);
   vtolDial.rotation.x = -0.5;
   group.add(vtolDial);
   buttons.push({ id: "VTOL", mesh: dialFace });
@@ -1440,9 +1513,7 @@ function buildCockpit() {
     setIndicator(id, on) {
       const light = lights.get(id);
       if (!light) return;
-      const m = light.material;
-      m.emissive.setHex(on ? 3407718 : 0);
-      m.color.setHex(on ? 6750122 : 2245666);
+      light.material.color.setHex(on ? 6750122 : 2245666);
     },
     press(id) {
       pressUntil.set(id, performance.now() + 130);
@@ -1458,13 +1529,12 @@ function buildCockpit() {
         body.position.z += ((pressed ? -0.05 : 0) - body.position.z) * 0.4;
       }
     },
-    setBars(shields, hull, throttle) {
+    setBars(hull, throttle) {
       const set = (m, frac) => {
         const f = Math.max(1e-3, Math.min(1, frac));
         m.scale.y = f;
         m.position.y = -0.12 - 0.12 + 0.12 * f;
       };
-      set(shieldBar, shields / 100);
       set(hullBar, hull / 100);
       set(thrBar, throttle);
     }
@@ -1547,10 +1617,12 @@ function drawRadar(ctx, cx, cy, R, blips, time) {
 
 // src/web/ground.ts
 import * as THREE10 from "three";
+var UP2 = new THREE10.Vector3(0, 1, 0);
 var TURRET = new THREE10.MeshStandardMaterial({ color: 6975351, metalness: 0.6, roughness: 0.45 });
 var BARREL = new THREE10.MeshStandardMaterial({ color: 3816770, metalness: 0.6, roughness: 0.4 });
 var PORT_RING = new THREE10.MeshStandardMaterial({ color: 5593439, metalness: 0.7, roughness: 0.4 });
 var Target = class {
+  // rotating turret head (aims at player)
   constructor(id, group, radius, halfExtents, hp, isPort) {
     this.id = id;
     this.group = group;
@@ -1569,6 +1641,8 @@ var Target = class {
   quaternion = new THREE10.Quaternion();
   // static (identity)
   alive = true;
+  fireCd = 1 + Math.random() * 2;
+  head = null;
   get position() {
     return this.group.position;
   }
@@ -1577,6 +1651,10 @@ var Target = class {
     if (this.hp <= 0) this.alive = false;
   }
 };
+var TURRET_RANGE = 4200;
+var TURRET_BOLT = 2400;
+var _v0 = new THREE10.Vector3();
+var _v1 = new THREE10.Vector3();
 var GroundTargets = class {
   constructor(root, effects, onKill) {
     this.root = root;
@@ -1594,58 +1672,94 @@ var GroundTargets = class {
   get combatants() {
     return this.targets;
   }
+  /** A point on the equatorial trench floor at angle a, oriented radially out. */
+  grooveSpot(a, depthFactor = 0.55) {
+    const r = DS_SPHERE_R - DS_TRENCH_DEPTH * depthFactor;
+    const radial = new THREE10.Vector3(Math.cos(a), 0, Math.sin(a));
+    const pos = DS_SPHERE_CENTER.clone().addScaledVector(radial, r);
+    const q = new THREE10.Quaternion().setFromUnitVectors(UP2, radial);
+    return { pos, q };
+  }
   build() {
-    for (let i = -6; i <= 6; i++) {
-      if (i === 0) continue;
+    const N = 26;
+    for (let i = 0; i < N; i++) {
+      const a = i / N * Math.PI * 2;
+      if (Math.abs(a) < 0.14) continue;
+      const radial = new THREE10.Vector3(Math.cos(a), 0, Math.sin(a));
+      const q = new THREE10.Quaternion().setFromUnitVectors(UP2, radial);
       for (const side of [-1, 1]) {
         const g = new THREE10.Group();
-        const base = new THREE10.Mesh(new THREE10.CylinderGeometry(70, 90, 120, 16), TURRET);
-        base.position.y = 60;
+        const base = new THREE10.Mesh(new THREE10.CylinderGeometry(120, 150, 220, 18), TURRET);
+        base.position.y = 110;
         g.add(base);
-        const head = new THREE10.Mesh(new THREE10.SphereGeometry(75, 16, 12), TURRET);
-        head.position.y = 150;
+        const head = new THREE10.Mesh(new THREE10.SphereGeometry(130, 18, 14), TURRET);
+        head.position.y = 250;
         g.add(head);
-        for (const bx of [-30, 30]) {
-          const barrel = new THREE10.Mesh(new THREE10.CylinderGeometry(12, 12, 180, 10), BARREL);
-          barrel.rotation.z = Math.PI / 2 - 0.3;
-          barrel.position.set(bx, 160, -90);
-          g.add(barrel);
+        const barrels = new THREE10.Group();
+        for (const bx of [-45, 45]) {
+          const barrel = new THREE10.Mesh(new THREE10.CylinderGeometry(20, 20, 300, 12), BARREL);
+          barrel.rotation.x = Math.PI / 2;
+          barrel.position.set(bx, 0, -150);
+          barrels.add(barrel);
         }
-        g.position.set(DS_CENTER.x + i * 1100, DS_Y + 5, DS_CENTER.y + side * (DS_TRENCH_HALF + 240));
+        barrels.position.y = 250;
+        g.add(barrels);
+        g.position.copy(DS_SPHERE_CENTER).addScaledVector(radial, DS_SPHERE_R - 60);
+        g.position.y += side * (DS_TRENCH_W + 60);
+        g.quaternion.copy(q);
         this.root.add(g);
-        this.targets.push(new Target(this.nextId++, g, 90, new THREE10.Vector3(110, 130, 110), 18, false));
+        const tgt = new Target(this.nextId++, g, 150, new THREE10.Vector3(170, 260, 170), 24, false);
+        tgt.head = barrels;
+        this.targets.push(tgt);
       }
     }
     const port = new THREE10.Group();
-    const ring = new THREE10.Mesh(new THREE10.TorusGeometry(120, 30, 12, 28), PORT_RING);
+    const ring = new THREE10.Mesh(new THREE10.TorusGeometry(150, 38, 12, 28), PORT_RING);
     ring.rotation.x = Math.PI / 2;
     port.add(ring);
     const wellGlow = new THREE10.Mesh(
-      new THREE10.CircleGeometry(110, 28),
-      new THREE10.MeshBasicMaterial({ color: new THREE10.Color(2.4, 1.4, 0.4), toneMapped: false })
+      new THREE10.CircleGeometry(140, 28),
+      new THREE10.MeshBasicMaterial({ color: new THREE10.Color(2.6, 1.5, 0.4), toneMapped: false })
     );
     wellGlow.rotation.x = -Math.PI / 2;
-    wellGlow.position.y = 2;
+    wellGlow.position.y = 4;
     port.add(wellGlow);
     for (let i = 0; i < 4; i++) {
-      const slat = new THREE10.Mesh(new THREE10.BoxGeometry(220, 12, 18), PORT_RING);
-      slat.position.set(0, 8, -75 + i * 50);
+      const slat = new THREE10.Mesh(new THREE10.BoxGeometry(280, 14, 22), PORT_RING);
+      slat.position.set(0, 10, -95 + i * 64);
       port.add(slat);
     }
-    port.position.copy(EXHAUST_PORT);
+    const ps = this.grooveSpot(0, 0.95);
+    port.position.copy(ps.pos);
+    port.quaternion.copy(ps.q);
     this.root.add(port);
-    this.targets.push(new Target(this.nextId++, port, 140, new THREE10.Vector3(150, 80, 150), 60, true));
+    this.targets.push(new Target(this.nextId++, port, 180, new THREE10.Vector3(190, 100, 190), 60, true));
   }
-  update() {
+  update(dt, player, fire) {
     for (let i = this.targets.length - 1; i >= 0; i--) {
       const t = this.targets[i];
-      if (t.alive) continue;
-      this.effects.spawnExplosion(t.position.clone(), t.isPort ? 4 : 1.6);
-      this.effects.spawnDebris(t.position.clone(), new THREE10.Vector3(), t.isPort ? 24 : 8, t.isPort ? 2 : 1);
-      this.root.remove(t.group);
-      this.onKill(t.isPort ? 1e3 : 150);
-      if (t.isPort) this.onPortDestroyed?.();
-      this.targets.splice(i, 1);
+      if (!t.alive) {
+        this.effects.spawnExplosion(t.position.clone(), t.isPort ? 4 : 1.6);
+        this.effects.spawnDebris(t.position.clone(), new THREE10.Vector3(), t.isPort ? 24 : 8, t.isPort ? 2 : 1);
+        this.root.remove(t.group);
+        this.onKill(t.isPort ? 1e3 : 150);
+        if (t.isPort) this.onPortDestroyed?.();
+        this.targets.splice(i, 1);
+        continue;
+      }
+      if (t.isPort) continue;
+      const dist = t.position.distanceTo(player.position);
+      if (dist > TURRET_RANGE) continue;
+      const tHit = dist / TURRET_BOLT;
+      const aim = _v0.copy(player.position).addScaledVector(player.velocity, tHit);
+      if (t.head) t.head.lookAt(aim);
+      t.fireCd -= dt;
+      if (t.fireCd <= 0) {
+        const dir = _v1.copy(aim).sub(t.position).normalize();
+        const muzzle = t.position.clone().addScaledVector(dir, 280).setY(t.position.y + 250);
+        fire(muzzle, dir);
+        t.fireCd = 1.4 + Math.random() * 1.4;
+      }
     }
   }
 };
@@ -1653,8 +1767,9 @@ var GroundTargets = class {
 // src/web/scene.ts
 var FORWARD3 = new THREE11.Vector3(0, 0, -1);
 var BOLT_SPEED2 = 2600;
-var ATMO_TOP = 1500;
-var G_SURF = 24;
+var GUN_RMAX = 3e3;
+var G_SURF = 26;
+var PLANET_CENTER3 = new THREE11.Vector3(PLANET_CENTER.x, PLANET_CY, PLANET_CENTER.y);
 var Scene3D = class {
   scene = new THREE11.Scene();
   camera;
@@ -1701,6 +1816,8 @@ var Scene3D = class {
   hardLock = false;
   autoLock = true;
   // auto-acquire nearest TIE; toggle off for manual targeting
+  aimAssistActive = false;
+  // true when the boresight reticle is inside the lock circle
   prevHardLock = false;
   raycaster = new THREE11.Raycaster();
   // surface battlefields (planet / Death Star)
@@ -1710,6 +1827,7 @@ var Scene3D = class {
   // Solid celestial bodies you crash into if you penetrate their surface.
   crashSpheres = [];
   prevPos = new THREE11.Vector3();
+  _dsRel = new THREE11.Vector3();
   groundTargets;
   // Player collision: half-extents of the X-wing hull (wingspan x, thin y/z).
   playerHalf = new THREE11.Vector3(7, 3, 11);
@@ -1764,8 +1882,9 @@ var Scene3D = class {
     this.tvTarget = new THREE11.WebGLRenderTarget(256, 256);
     const pmrem = new THREE11.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    const sun = new THREE11.DirectionalLight(16773856, 2.6);
-    sun.position.set(0.5, 0.8, 0.3);
+    const sunDir = new THREE11.Vector3(0.5, 0.8, 0.3).normalize();
+    const sun = new THREE11.DirectionalLight(16774368, 2.7);
+    sun.position.copy(sunDir);
     this.scene.add(sun);
     this.scene.add(new THREE11.HemisphereLight(4213350, 526352, 0.7));
     this.scene.add(new THREE11.AmbientLight(2240580, 0.6));
@@ -1874,21 +1993,12 @@ var Scene3D = class {
     this.timeSinceHit = 0;
     this.onPlayerHit?.();
     if (kind === "missile") {
-      this.shields = 0;
       this.hull = 0;
       this.killPlayer();
       return;
     }
     const hullBefore = this.hull;
-    if (this.shields > 0) {
-      this.shields -= dmg;
-      if (this.shields < 0) {
-        this.hull += this.shields;
-        this.shields = 0;
-      }
-    } else {
-      this.hull -= dmg;
-    }
+    this.hull -= dmg;
     if (this.hull < hullBefore) {
       this.gunHits++;
       if (this.gunHits >= 3) this.ensureDamageFire();
@@ -1960,7 +2070,6 @@ var Scene3D = class {
     this.player.group.quaternion.identity();
     this.player.resetMotion(320);
     this.hull = 100;
-    this.shields = 100;
     this.laserHeat = 0;
     this.overheated = false;
     this.removeDamageFire();
@@ -1978,14 +2087,12 @@ var Scene3D = class {
     const fwd = this.player.forward();
     let aimDir = fwd;
     const info = this.lockedId != null ? this.enemies.info(this.lockedId) : null;
-    if (info) {
+    if (info && this.aimAssistActive) {
       const rel = info.position.clone().sub(this.player.group.position);
-      if (rel.clone().normalize().dot(fwd) > 0.94 && rel.length() < 3500) {
-        const relVel = info.velocity.clone().sub(this.player.vel);
-        const tHit = this.interceptTime(rel, relVel, BOLT_SPEED2);
-        if (tHit != null) {
-          aimDir = info.position.clone().addScaledVector(info.velocity, tHit).sub(this.player.group.position).normalize();
-        }
+      const relVel = info.velocity.clone().sub(this.player.vel);
+      const tHit = this.interceptTime(rel, relVel, BOLT_SPEED2);
+      if (tHit != null) {
+        aimDir = info.position.clone().addScaledVector(info.velocity, tHit).sub(this.player.group.position).normalize();
       }
     }
     const pair = this.cannonIdx % 2 === 0 ? [0, 3] : [1, 2];
@@ -2166,14 +2273,21 @@ var Scene3D = class {
    * frictionless vacuum in open space. You must hold thrust (or hover in VTOL)
    * to stay aloft near the deck.
    */
+  /** Air density 0..1 at the player (0 = vacuum, 1 = planet surface). */
+  atmoDensity() {
+    const d = this.tmp.copy(PLANET_CENTER3).sub(this.player.group.position).length();
+    const alt = d - PLANET_R;
+    if (alt < 0 || alt > ATMO_THICKNESS) return 0;
+    return 1 - alt / ATMO_THICKNESS;
+  }
   applyEnvironment(dt) {
     const pos = this.player.group.position;
-    const gh = this.surfaceHeightAt(pos.x, pos.z);
-    if (!Number.isFinite(gh)) return;
-    const alt = Math.max(0, pos.y - gh);
-    const density = Math.max(0, 1 - alt / ATMO_TOP);
-    if (density <= 0) return;
-    this.player.vel.y -= G_SURF * density * dt;
+    const toCenter = this.tmp.copy(PLANET_CENTER3).sub(pos);
+    const d = toCenter.length();
+    const alt = d - PLANET_R;
+    if (alt < 0 || alt > ATMO_THICKNESS) return;
+    const density = 1 - alt / ATMO_THICKNESS;
+    this.player.vel.addScaledVector(toCenter.divideScalar(d || 1), G_SURF * density * dt);
   }
   /** Planet / Death Star surface: ground collision, landing, base repair. */
   handleSurface(dt) {
@@ -2205,8 +2319,7 @@ var Scene3D = class {
       let nearPad = Infinity;
       for (const pad of this.pads) nearPad = Math.min(nearPad, Math.hypot(pos.x - pad.x, pos.z - pad.z));
       if (nearPad < 480) {
-        this.hull = Math.min(100, this.hull + 20 * dt);
-        this.shields = Math.min(100, this.shields + 26 * dt);
+        this.hull = Math.min(100, this.hull + 24 * dt);
         this.torps = 8;
         if (this.hull > 80) this.removeDamageFire();
         this.flash("DOCKED \u2014 REPAIRING & REARMING", 0.4);
@@ -2275,8 +2388,17 @@ var Scene3D = class {
       for (const sph of this.crashSpheres) {
         if (p.distanceTo(sph.c) < sph.r - 35) return true;
       }
+      if (this.deathStarHit(p)) return true;
     }
     return false;
+  }
+  /** Solid Death Star, with the equatorial trench cut out so you can fly it. */
+  deathStarHit(p) {
+    const rel = this._dsRel.copy(p).sub(DS_SPHERE_CENTER);
+    const d = rel.length();
+    if (d > DS_SPHERE_R - 9 || d < 1) return false;
+    const inTrench = Math.abs(rel.y) < DS_TRENCH_W - 12 && d > DS_SPHERE_R - DS_TRENCH_DEPTH;
+    return !inTrench;
   }
   /**
    * Smallest positive time for a projectile of muzzle `speed` to intercept a
@@ -2312,12 +2434,9 @@ var Scene3D = class {
       if (t >= this.respawnAt) this.respawn(this.lives <= 0);
     } else {
       this.prevPos.copy(this.player.group.position);
-      this.player.update(controls, dt);
+      this.player.update(controls, dt, this.atmoDensity());
       if (controls.boost && this.player.sfoilsOpen) this.flash("FOLD S-FOILS FOR SUBLIGHT", 0.6);
       this.timeSinceHit += dt;
-      if (this.timeSinceHit > 4 && this.shields < 100) {
-        this.shields = Math.min(100, this.shields + 8 * dt);
-      }
       this.laserHeat = Math.max(0, this.laserHeat - dt * 0.35);
       if (this.overheated && this.laserHeat < 0.3) this.overheated = false;
       this.applyEnvironment(dt);
@@ -2349,7 +2468,11 @@ var Scene3D = class {
     });
     const combatants = this.dead ? [...this.enemies.combatants, ...this.groundTargets.combatants] : [this.playerCombatant, ...this.enemies.combatants, ...this.groundTargets.combatants];
     this.blasters.update(dt, combatants);
-    this.groundTargets.update();
+    const pRef = { position: this.player.group.position, velocity: this.player.velocity(this.tmp).clone() };
+    this.groundTargets.update(dt, pRef, (origin, dir) => {
+      this.blasters.fire(origin, dir, this.tmp2.set(0, 0, 0), "enemy", 9);
+      this.onEnemyFire?.();
+    });
     if (!this.dead) {
       for (const c of [...this.enemies.combatants, ...this.groundTargets.combatants]) {
         if (!c.alive) continue;
@@ -2456,7 +2579,7 @@ var Scene3D = class {
     h.throttle = this.lastThrottle;
     h.flightAssist = this.player.flightAssist;
     h.hull = Math.max(0, Math.round(this.hull));
-    h.shields = Math.max(0, Math.round(this.shields));
+    h.shields = 0;
     h.score = this.score;
     h.wave = this.wave;
     h.lives = this.lives;
@@ -2470,6 +2593,10 @@ var Scene3D = class {
     h.landed = this.landed;
     h.gear = this.player.gearDown;
     h.vtol = this.player.vtol;
+    h.inAtmo = this.player.inAtmo;
+    h.aoa = this.player.aoaDeg;
+    h.gLoad = this.player.gLoad;
+    h.stalled = this.player.stalled;
     this.feed = this.feed.filter((f) => f.until > t);
     h.feed = this.feed.map((f) => ({ text: f.text, color: f.color, alpha: Math.min(1, (f.until - t) / 0.8) }));
     h.a2g = null;
@@ -2481,6 +2608,15 @@ var Scene3D = class {
     h.target = void 0;
     h.lock = void 0;
     const pp = this.player.group.position;
+    h.prograde = void 0;
+    h.gunReticle = void 0;
+    if (this.player.vel.lengthSq() > 1) {
+      const pg = this.project(this.tmp.copy(this.player.vel).normalize().multiplyScalar(3e3).add(pp));
+      h.prograde = { x: pg.x, y: pg.y, behind: pg.behind };
+    }
+    const boltVel = this.player.forward().multiplyScalar(BOLT_SPEED2).add(this.player.vel).normalize();
+    const gr = this.project(boltVel.multiplyScalar(3e3).add(pp));
+    h.gunReticle = { x: gr.x, y: gr.y, behind: gr.behind };
     const info = this.lockedId != null ? this.enemies.info(this.lockedId) : null;
     if (info) {
       h.lock = { state: this.hardLock ? "locked" : "searching", progress: this.lockProgress };
@@ -2495,19 +2631,25 @@ var Scene3D = class {
         if (!lp.behind) lead = { x: lp.x, y: lp.y };
       }
       h.target = { x: box.x, y: box.y, dist, behind: box.behind, lead };
+      const R = 70;
+      const inside = !box.behind && !gr.behind && dist < 3700 && Math.hypot(box.x - gr.x, box.y - gr.y) < R;
+      this.aimAssistActive = inside;
+      if (!box.behind) h.assistCircle = { x: box.x, y: box.y, r: R, active: inside };
+      const los = relPos.clone().normalize();
+      h.closure = -relVel.dot(los);
+      h.gunRange = GUN_RMAX;
+      h.shoot = inside && dist < GUN_RMAX;
+    } else {
+      this.aimAssistActive = false;
+      h.closure = void 0;
+      h.shoot = false;
+      h.gunRange = void 0;
     }
-    h.prograde = void 0;
-    h.gunReticle = void 0;
-    if (this.player.vel.lengthSq() > 1) {
-      const pg = this.project(this.tmp.copy(this.player.vel).normalize().multiplyScalar(3e3).add(pp));
-      h.prograde = { x: pg.x, y: pg.y, behind: pg.behind };
-    }
-    const boltVel = this.player.forward().multiplyScalar(BOLT_SPEED2).add(this.player.vel).normalize();
-    const gr = this.project(boltVel.multiplyScalar(3e3).add(pp));
-    h.gunReticle = { x: gr.x, y: gr.y, behind: gr.behind };
+    const fwd2 = this.player.forward(this.tmp);
+    h.heading = (Math.atan2(fwd2.x, -fwd2.z) * 180 / Math.PI + 360) % 360;
     this.updateRadar();
     h.blips = this.blips;
-    this.cockpit.setBars(this.shields, this.hull, Math.min(1, h.throttle));
+    this.cockpit.setBars(this.hull, Math.min(1, h.throttle));
   }
   /** Build player-local radar blips and refresh the cockpit scope texture. */
   updateRadar() {
@@ -2629,19 +2771,34 @@ var HUD = class {
     ctx.stroke();
     if (d.gunReticle && !d.gunReticle.behind) {
       const g = d.gunReticle;
-      ctx.strokeStyle = AMBER;
+      const rad = 26;
+      ctx.strokeStyle = GREEN;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(g.x, g.y - 9);
-      ctx.lineTo(g.x + 9, g.y);
-      ctx.lineTo(g.x, g.y + 9);
-      ctx.lineTo(g.x - 9, g.y);
-      ctx.closePath();
+      ctx.arc(g.x, g.y, rad, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.fillStyle = AMBER;
+      ctx.fillStyle = GREEN;
       ctx.beginPath();
-      ctx.arc(g.x, g.y, 1.8, 0, Math.PI * 2);
+      ctx.arc(g.x, g.y, 2.4, 0, Math.PI * 2);
       ctx.fill();
+      if (d.gunRange && d.target && !d.target.behind) {
+        const frac = Math.max(0, Math.min(1, 1 - d.target.dist / d.gunRange));
+        if (frac > 0) {
+          ctx.strokeStyle = d.shoot ? RED2 : GREEN;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(g.x, g.y, rad + 5, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+      if (d.shoot) {
+        ctx.fillStyle = RED2;
+        ctx.font = "bold 18px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("SHOOT", g.x, g.y - rad - 16);
+        ctx.font = "15px monospace";
+      }
+      ctx.lineWidth = 2;
     }
     if (d.prograde && !d.prograde.behind) {
       const p = d.prograde;
@@ -2658,6 +2815,28 @@ var HUD = class {
       ctx.moveTo(p.x, p.y - 7);
       ctx.lineTo(p.x, p.y - 13);
       ctx.stroke();
+    }
+    ctx.strokeStyle = GREEN;
+    ctx.fillStyle = GREEN;
+    ctx.lineWidth = 1.5;
+    ctx.font = "20px monospace";
+    ctx.textAlign = "right";
+    ctx.strokeRect(cx - 210, cy - 18, 78, 36);
+    ctx.fillText(`${Math.round(d.speed)}`, cx - 138, cy);
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("M/S", cx - 171, cy - 28);
+    ctx.lineWidth = 2;
+    if (d.assistCircle) {
+      const a = d.assistCircle;
+      ctx.strokeStyle = a.active ? GREEN : "rgba(150,170,185,0.5)";
+      ctx.lineWidth = a.active ? 2.5 : 1.5;
+      ctx.setLineDash(a.active ? [] : [5, 5]);
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineWidth = 2;
     }
     if (d.target) {
       if (d.target.behind || d.target.x < 0 || d.target.x > W || d.target.y < 0 || d.target.y > H) {
@@ -2691,6 +2870,10 @@ var HUD = class {
         ctx.fillStyle = inRange ? RED2 : AMBER;
         ctx.textAlign = "left";
         ctx.fillText(`${Math.round(dist)}m`, x + s + 4, y - s);
+        if (d.closure != null) {
+          const c = Math.round(d.closure);
+          ctx.fillText(`${c >= 0 ? "+" : ""}${c} m/s`, x + s + 4, y - s + 18);
+        }
         if (d.target.lead) {
           ctx.strokeStyle = GREEN;
           ctx.beginPath();
@@ -2743,7 +2926,6 @@ var HUD = class {
         }
       }
     }
-    this.bar(30, H - 120, "SHIELDS", d.shields / 100, CYAN);
     this.bar(30, H - 92, "HULL", d.hull / 100, d.hull > 30 ? GREEN : RED2);
     this.bar(30, H - 64, "LASER", 1 - d.laserHeat, d.laserHeat > 0.8 ? RED2 : AMBER);
     if (d.agl != null && Number.isFinite(d.agl)) {
@@ -2754,6 +2936,33 @@ var HUD = class {
       if (d.landed) {
         ctx.fillStyle = GREEN;
         ctx.fillText("\u25CF LANDED", 110, H - 150);
+      }
+    }
+    if (d.inAtmo) {
+      ctx.textAlign = "left";
+      ctx.font = "15px monospace";
+      const g = d.gLoad ?? 1, aoa = d.aoa ?? 0;
+      ctx.fillStyle = g > 7.5 ? RED2 : GREEN;
+      ctx.fillText(`G ${g.toFixed(1)}`, 30, H - 200);
+      ctx.fillStyle = aoa > 22 ? RED2 : aoa > 14 ? AMBER : GREEN;
+      ctx.fillText(`AOA ${Math.round(aoa)}\xB0`, 30, H - 178);
+      if (d.prograde && !d.prograde.behind) {
+        const p = d.prograde, bx = p.x - 26;
+        const onSpeed = aoa >= 6 && aoa <= 10;
+        ctx.strokeStyle = onSpeed ? GREEN : aoa > 10 ? RED2 : AMBER;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bx - 8, p.y - 9);
+        ctx.lineTo(bx, p.y);
+        ctx.lineTo(bx - 8, p.y + 9);
+        ctx.stroke();
+      }
+      if (d.stalled) {
+        ctx.fillStyle = RED2;
+        ctx.font = "bold 22px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("STALL", cx, cy + 150);
+        ctx.font = "15px monospace";
       }
     }
     ctx.strokeStyle = AMBER;
@@ -3207,6 +3416,17 @@ var AudioEngine = class {
 var InputManager = class {
   keys = /* @__PURE__ */ new Set();
   throttle = 0.55;
+  // Touch / on-screen controls (set by the mobile UI). Axes are -1..1, throttle
+  // is absolute 0..1 (or null to leave keyboard in charge), gun/boost are held.
+  touch = {
+    active: false,
+    pitch: 0,
+    roll: 0,
+    yaw: 0,
+    throttle: null,
+    gun: false,
+    boost: false
+  };
   onTorpedo = null;
   onBomb = null;
   onTarget = null;
@@ -3218,8 +3438,8 @@ var InputManager = class {
   onAutoLock = null;
   onFirstGesture = null;
   gestureFired = false;
-  attach(el = window) {
-    el.addEventListener("keydown", (e) => {
+  attach(el2 = window) {
+    el2.addEventListener("keydown", (e) => {
       const k = e.key.toLowerCase();
       const fresh = !this.keys.has(k);
       this.keys.add(k);
@@ -3239,8 +3459,8 @@ var InputManager = class {
         if (k === "h") this.onVtol?.();
       }
     });
-    el.addEventListener("keyup", (e) => this.keys.delete(e.key.toLowerCase()));
-    el.addEventListener("pointerdown", () => {
+    el2.addEventListener("keyup", (e) => this.keys.delete(e.key.toLowerCase()));
+    el2.addEventListener("pointerdown", () => {
       if (!this.gestureFired) {
         this.gestureFired = true;
         this.onFirstGesture?.();
@@ -3273,6 +3493,13 @@ var InputManager = class {
       if (gpYaw) yaw = gpYaw;
       if (pad.buttons[7]?.pressed) boost = true;
     }
+    if (this.touch.active) {
+      if (this.touch.pitch) pitch = this.touch.pitch;
+      if (this.touch.roll) roll = this.touch.roll;
+      if (this.touch.yaw) yaw = this.touch.yaw;
+      if (this.touch.boost) boost = true;
+      if (this.touch.throttle != null) this.throttle = this.touch.throttle;
+    }
     return {
       pitch: Math.max(-1, Math.min(1, pitch)),
       roll: Math.max(-1, Math.min(1, roll)),
@@ -3282,7 +3509,7 @@ var InputManager = class {
     };
   }
   get gunHeld() {
-    return this.keys.has(" ");
+    return this.keys.has(" ") || this.touch.gun;
   }
 };
 
@@ -3318,16 +3545,16 @@ var Net = class {
       } catch {
         return;
       }
-      switch (m.t) {
+      switch (m.t ?? m.mt) {
         case "welcome":
           this.id = m.id;
           this.onWelcome?.(m.id);
           break;
         case "s":
-          this.onState?.(m.id, m);
+          this.onState?.(m.id, m.s);
           break;
         case "f":
-          this.onFire?.(m.id, m);
+          this.onFire?.(m.id, m.f);
           break;
         case "leave":
           this.onLeave?.(m.id);
@@ -3339,14 +3566,276 @@ var Net = class {
     if (this.connected && this.ws) this.ws.send(JSON.stringify(obj));
   }
   sendState(s) {
-    this.send({ t: "s", ...s });
+    this.send({ mt: "s", s });
   }
   sendFire(f) {
-    this.send({ t: "f", ...f });
+    this.send({ mt: "f", f });
   }
 };
 
+// src/web/mobile.ts
+function isTouchDevice() {
+  return typeof window !== "undefined" && ("ontouchstart" in window || (navigator.maxTouchPoints ?? 0) > 0);
+}
+function el(tag, style, text) {
+  const e = document.createElement(tag);
+  Object.assign(e.style, style);
+  if (text) e.textContent = text;
+  return e;
+}
+var BTN_BASE = {
+  position: "absolute",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontFamily: "monospace",
+  fontWeight: "bold",
+  fontSize: "13px",
+  color: "#ffe27a",
+  background: "rgba(20,28,36,0.55)",
+  border: "2px solid #ffb627",
+  borderRadius: "10px",
+  userSelect: "none",
+  touchAction: "none",
+  textAlign: "center",
+  lineHeight: "1.1"
+};
+function setupMobileControls(input2) {
+  if (!isTouchDevice()) return;
+  input2.touch.active = true;
+  const help = document.getElementById("help");
+  if (help) help.style.display = "none";
+  const root = el("div", {
+    position: "absolute",
+    inset: "0",
+    pointerEvents: "none",
+    zIndex: "20",
+    touchAction: "none"
+  });
+  document.body.appendChild(root);
+  const R = 70;
+  const base = el("div", {
+    position: "absolute",
+    left: "24px",
+    bottom: "24px",
+    width: `${R * 2}px`,
+    height: `${R * 2}px`,
+    borderRadius: "50%",
+    background: "rgba(20,28,36,0.45)",
+    border: "2px solid #46d8ff",
+    pointerEvents: "auto",
+    touchAction: "none"
+  });
+  const knob = el("div", {
+    position: "absolute",
+    left: "50%",
+    top: "50%",
+    width: "62px",
+    height: "62px",
+    marginLeft: "-31px",
+    marginTop: "-31px",
+    borderRadius: "50%",
+    background: "rgba(70,216,255,0.5)",
+    border: "2px solid #cfeefe"
+  });
+  base.appendChild(knob);
+  root.appendChild(base);
+  let stickId = -1;
+  const stickMove = (cx, cy) => {
+    const r = base.getBoundingClientRect();
+    let dx = cx - (r.left + R), dy = cy - (r.top + R);
+    const len = Math.hypot(dx, dy);
+    if (len > R) {
+      dx = dx / len * R;
+      dy = dy / len * R;
+    }
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+    input2.touch.roll = dx / R;
+    input2.touch.pitch = -dy / R;
+  };
+  const stickEnd = () => {
+    stickId = -1;
+    knob.style.transform = "translate(0,0)";
+    input2.touch.roll = 0;
+    input2.touch.pitch = 0;
+  };
+  base.addEventListener("pointerdown", (e) => {
+    stickId = e.pointerId;
+    base.setPointerCapture(e.pointerId);
+    stickMove(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  base.addEventListener("pointermove", (e) => {
+    if (e.pointerId === stickId) {
+      stickMove(e.clientX, e.clientY);
+      e.preventDefault();
+    }
+  });
+  base.addEventListener("pointerup", (e) => {
+    if (e.pointerId === stickId) stickEnd();
+  });
+  base.addEventListener("pointercancel", () => stickEnd());
+  const tH = 200;
+  const tTrack = el("div", {
+    position: "absolute",
+    right: "30px",
+    bottom: "30px",
+    width: "54px",
+    height: `${tH}px`,
+    background: "rgba(20,28,36,0.45)",
+    border: "2px solid #ffb627",
+    borderRadius: "27px",
+    pointerEvents: "auto",
+    touchAction: "none"
+  });
+  const tKnob = el("div", {
+    position: "absolute",
+    left: "3px",
+    width: "44px",
+    height: "44px",
+    borderRadius: "50%",
+    background: "rgba(255,182,39,0.6)",
+    border: "2px solid #ffe27a",
+    bottom: "0px"
+  });
+  const tLabel = el("div", { position: "absolute", right: "30px", bottom: `${30 + tH + 6}px`, width: "54px", textAlign: "center", fontFamily: "monospace", fontSize: "11px", color: "#ffb627" }, "THR");
+  tTrack.appendChild(tKnob);
+  root.appendChild(tTrack);
+  root.appendChild(tLabel);
+  const setThrottle = (cy) => {
+    const r = tTrack.getBoundingClientRect();
+    let f = 1 - (cy - r.top) / r.height;
+    f = Math.max(0, Math.min(1, f));
+    input2.touch.throttle = f;
+    tKnob.style.bottom = `${f * (tH - 44)}px`;
+  };
+  let tId = -1;
+  tTrack.addEventListener("pointerdown", (e) => {
+    tId = e.pointerId;
+    tTrack.setPointerCapture(e.pointerId);
+    setThrottle(e.clientY);
+    e.preventDefault();
+  });
+  tTrack.addEventListener("pointermove", (e) => {
+    if (e.pointerId === tId) {
+      setThrottle(e.clientY);
+      e.preventDefault();
+    }
+  });
+  tTrack.addEventListener("pointerup", (e) => {
+    if (e.pointerId === tId) tId = -1;
+  });
+  input2.touch.throttle = 0.55;
+  tKnob.style.bottom = `${0.55 * (tH - 44)}px`;
+  const holdBtn = (label, css, onDown, onUp, color = "#ffb627") => {
+    const b = el("div", { ...BTN_BASE, ...css, pointerEvents: "auto", borderColor: color, color }, label);
+    const down = (e) => {
+      b.style.background = "rgba(255,182,39,0.35)";
+      onDown();
+      e.preventDefault();
+    };
+    const up = () => {
+      b.style.background = "rgba(20,28,36,0.55)";
+      onUp();
+    };
+    b.addEventListener("pointerdown", down);
+    b.addEventListener("pointerup", up);
+    b.addEventListener("pointercancel", up);
+    b.addEventListener("pointerleave", up);
+    root.appendChild(b);
+    return b;
+  };
+  const tapBtn = (label, css, action, color = "#ffe27a") => {
+    const b = el("div", { ...BTN_BASE, ...css, pointerEvents: "auto", borderColor: color, color }, label);
+    b.addEventListener("pointerdown", (e) => {
+      b.style.background = "rgba(255,182,39,0.35)";
+      action();
+      e.preventDefault();
+    });
+    b.addEventListener("pointerup", () => {
+      b.style.background = "rgba(20,28,36,0.55)";
+    });
+    root.appendChild(b);
+    return b;
+  };
+  holdBtn(
+    "FIRE",
+    { right: "100px", bottom: "40px", width: "92px", height: "92px", borderRadius: "50%", fontSize: "18px", color: "#ff5544", borderColor: "#ff5544" },
+    () => {
+      input2.touch.gun = true;
+    },
+    () => {
+      input2.touch.gun = false;
+    },
+    "#ff5544"
+  );
+  holdBtn(
+    "BOOST",
+    { right: "210px", bottom: "60px", width: "78px", height: "60px" },
+    () => {
+      input2.touch.boost = true;
+    },
+    () => {
+      input2.touch.boost = false;
+    },
+    "#46d8ff"
+  );
+  holdBtn(
+    "\u25C4 YAW",
+    { left: "180px", bottom: "30px", width: "66px", height: "52px" },
+    () => {
+      input2.touch.yaw = -1;
+    },
+    () => {
+      input2.touch.yaw = 0;
+    }
+  );
+  holdBtn(
+    "YAW \u25BA",
+    { left: "180px", bottom: "92px", width: "66px", height: "52px" },
+    () => {
+      input2.touch.yaw = 1;
+    },
+    () => {
+      input2.touch.yaw = 0;
+    }
+  );
+  tapBtn("LOCK\nTGT", { right: "20px", bottom: "250px", width: "70px", height: "56px" }, () => input2.onTarget?.());
+  tapBtn("BOMB", { right: "20px", bottom: "314px", width: "70px", height: "56px" }, () => input2.onBomb?.());
+  tapBtn("VIEW", { right: "20px", bottom: "378px", width: "70px", height: "56px" }, () => input2.onView?.());
+  const toggles = [
+    { label: "S-FOIL", fn: () => input2.onSFoils?.() },
+    { label: "ASSIST", fn: () => input2.onFlightAssist?.() },
+    { label: "GEAR", fn: () => input2.onGear?.() },
+    { label: "VTOL", fn: () => input2.onVtol?.() },
+    { label: "AUTO", fn: () => input2.onAutoLock?.() }
+  ];
+  toggles.forEach((t, i) => {
+    const b = el("div", { ...BTN_BASE, pointerEvents: "auto", right: "20px", top: `${70 + i * 54}px`, width: "78px", height: "44px", borderColor: "#5dff7a", color: "#5dff7a" }, t.label);
+    b.addEventListener("pointerdown", (e) => {
+      b.style.background = "rgba(93,255,122,0.3)";
+      t.fn();
+      e.preventDefault();
+    });
+    b.addEventListener("pointerup", () => {
+      b.style.background = "rgba(20,28,36,0.55)";
+    });
+    root.appendChild(b);
+  });
+}
+
 // src/web/main.ts
+function showError(label, e) {
+  console.error(label, e);
+  const s = document.getElementById("splash");
+  const msg = e && e.stack || String(e);
+  if (s) {
+    s.style.display = "flex";
+    s.innerHTML = `<h1 style="color:#ff5544;font-size:22px">\u26A0 ${label}</h1><pre style="color:#ffd24a;max-width:90vw;white-space:pre-wrap;font-size:12px;text-align:left">${msg}</pre>`;
+  }
+}
+window.addEventListener("error", (ev) => showError("Runtime error", ev.error ?? ev.message));
+window.addEventListener("unhandledrejection", (ev) => showError("Promise error", ev.reason));
 var glCanvas = document.getElementById("gl");
 var hudCanvas = document.getElementById("hud");
 var scene = new Scene3D(glCanvas);
@@ -3363,6 +3852,11 @@ input.onFlightAssist = () => scene.toggleFlightAssist();
 input.onGear = () => scene.toggleGear();
 input.onVtol = () => scene.toggleVtol();
 input.onAutoLock = () => scene.toggleAutoLock();
+try {
+  setupMobileControls(input);
+} catch (e) {
+  console.warn("mobile controls init failed", e);
+}
 scene.onPlayerFire = () => audio.laser();
 scene.onEnemyFire = () => audio.enemyLaser();
 scene.onExplosion = () => audio.explosion();
@@ -3374,7 +3868,11 @@ net.onState = (id, s) => scene.upsertRemote(id, s);
 net.onFire = (_id, f) => scene.spawnNetBolt(f);
 net.onLeave = (id) => scene.removeRemote(id);
 scene.onFire = (o, d, v) => net.sendFire({ o, d, v });
-net.connect(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`);
+try {
+  net.connect(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`);
+} catch (e) {
+  console.warn("net connect failed", e);
+}
 var lastNetSend = 0;
 var dragging = false;
 var moved = false;
@@ -3417,30 +3915,38 @@ var acc = 0;
 var last = performance.now();
 var lastLaser = 0;
 var lastSearchBeep = 0;
+var frameErrShown = false;
 function frame(now) {
-  const wall = Math.min(0.1, (now - last) / 1e3);
-  last = now;
-  const controls = input.sample(wall);
-  acc += wall;
-  while (acc >= SIM_DT) {
-    scene.update(controls, SIM_DT);
-    acc -= SIM_DT;
-  }
-  if (input.gunHeld && now - lastLaser > 95) {
-    scene.firePrimary();
-    lastLaser = now;
-  }
-  if (net.connected && now - lastNetSend > 50) {
-    net.sendState(scene.getNetState());
-    lastNetSend = now;
-  }
-  scene.render();
-  const h = scene.getHud();
-  hud.draw(h);
-  audio.update(h.throttle * 100, h.throttle, 0);
-  if (h.lock?.state === "searching" && h.lock.progress > 0 && now - lastSearchBeep > 300) {
-    audio.lockSearch();
-    lastSearchBeep = now;
+  try {
+    const wall = Math.min(0.1, (now - last) / 1e3);
+    last = now;
+    const controls = input.sample(wall);
+    acc += wall;
+    while (acc >= SIM_DT) {
+      scene.update(controls, SIM_DT);
+      acc -= SIM_DT;
+    }
+    if (input.gunHeld && now - lastLaser > 95) {
+      scene.firePrimary();
+      lastLaser = now;
+    }
+    if (net.connected && now - lastNetSend > 50) {
+      net.sendState(scene.getNetState());
+      lastNetSend = now;
+    }
+    scene.render();
+    const h = scene.getHud();
+    hud.draw(h);
+    audio.update(h.throttle * 100, h.throttle, 0);
+    if (h.lock?.state === "searching" && h.lock.progress > 0 && now - lastSearchBeep > 300) {
+      audio.lockSearch();
+      lastSearchBeep = now;
+    }
+  } catch (e) {
+    if (!frameErrShown) {
+      frameErrShown = true;
+      showError("Frame error", e);
+    }
   }
   requestAnimationFrame(frame);
 }

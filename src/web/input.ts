@@ -24,6 +24,15 @@ export class InputManager {
   private keys = new Set<string>();
   private throttle = 0.55;
 
+  // Touch / on-screen controls (set by the mobile UI). Axes are -1..1, throttle
+  // is absolute 0..1 (or null to leave keyboard in charge), gun/boost are held.
+  touch = {
+    active: false,
+    pitch: 0, roll: 0, yaw: 0,
+    throttle: null as number | null,
+    gun: false, boost: false,
+  };
+
   onTorpedo: (() => void) | null = null;
   onBomb: (() => void) | null = null;
   onTarget: (() => void) | null = null;
@@ -90,6 +99,15 @@ export class InputManager {
       if (pad.buttons[7]?.pressed) boost = true;
     }
 
+    // On-screen touch controls override when deflected.
+    if (this.touch.active) {
+      if (this.touch.pitch) pitch = this.touch.pitch;
+      if (this.touch.roll) roll = this.touch.roll;
+      if (this.touch.yaw) yaw = this.touch.yaw;
+      if (this.touch.boost) boost = true;
+      if (this.touch.throttle != null) this.throttle = this.touch.throttle;
+    }
+
     return {
       pitch: Math.max(-1, Math.min(1, pitch)),
       roll: Math.max(-1, Math.min(1, roll)),
@@ -99,5 +117,5 @@ export class InputManager {
     };
   }
 
-  get gunHeld(): boolean { return this.keys.has(" "); }
+  get gunHeld(): boolean { return this.keys.has(" ") || this.touch.gun; }
 }

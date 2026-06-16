@@ -43,10 +43,12 @@ export class Net {
     this.ws.onmessage = (ev) => {
       let m: any;
       try { m = JSON.parse(ev.data); } catch { return; }
-      switch (m.t) {
+      // Server messages use `t` (welcome/leave); relayed client messages use `mt`
+      // with the payload nested (so it can't collide with snapshot fields).
+      switch (m.t ?? m.mt) {
         case "welcome": this.id = m.id; this.onWelcome?.(m.id); break;
-        case "s": this.onState?.(m.id, m as ShipSnapshot); break;
-        case "f": this.onFire?.(m.id, m as FireEvent); break;
+        case "s": this.onState?.(m.id, m.s as ShipSnapshot); break;
+        case "f": this.onFire?.(m.id, m.f as FireEvent); break;
         case "leave": this.onLeave?.(m.id); break;
       }
     };
@@ -56,6 +58,6 @@ export class Net {
     if (this.connected && this.ws) this.ws.send(JSON.stringify(obj));
   }
 
-  sendState(s: ShipSnapshot): void { this.send({ t: "s", ...s }); }
-  sendFire(f: FireEvent): void { this.send({ t: "f", ...f }); }
+  sendState(s: ShipSnapshot): void { this.send({ mt: "s", s }); }
+  sendFire(f: FireEvent): void { this.send({ mt: "f", f }); }
 }

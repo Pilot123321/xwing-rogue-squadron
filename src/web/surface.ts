@@ -15,9 +15,17 @@ export const PLANET_CENTER = new THREE.Vector2(0, 0);
 export const PLANET_RADIUS = 15500;
 export const PLANET_Y = -2600;
 
-export const DS_CENTER = new THREE.Vector2(52000, 0);
+export const DS_CENTER = new THREE.Vector2(30000, 0);
 export const DS_RADIUS = 11000;
 export const DS_Y = -2600;
+
+// The Death Star is a solid sphere with an equatorial trench groove cut into it.
+// Its centre is placed so the equatorial trench sits near the player's altitude
+// (y ~ 0), so the run is actually reachable and visible.
+export const DS_SPHERE_R = 13000;
+export const DS_SPHERE_CENTER = new THREE.Vector3(DS_CENTER.x, -300, DS_CENTER.y);
+export const DS_TRENCH_W = 750; // half-width of the trench band (along the equator axis)
+export const DS_TRENCH_DEPTH = 1900; // how deep the groove cuts below the surface
 
 /** Rebel base centre (on the flattened planet apron). */
 export const BASE_POS = new THREE.Vector3(0, PLANET_Y, 2600);
@@ -45,6 +53,8 @@ function planetFbm(x: number, z: number): number {
 // is a proper round dome (no flared skirt).
 export const PLANET_R = 9000;
 export const PLANET_CY = PLANET_Y - PLANET_R; // centre, so the top is at PLANET_Y
+/** Atmosphere shell thickness above the planet surface (AGL where air fades to vacuum). */
+export const ATMO_THICKNESS = 1500;
 function planetHeight(x: number, z: number): number {
   const d = Math.hypot(x - PLANET_CENTER.x, z - PLANET_CENTER.y);
   if (d >= PLANET_R) return PLANET_CY; // past the visible cap — flat low (rarely reached)
@@ -135,6 +145,17 @@ export function buildSurface(): Surface {
     new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0 }));
   planet.position.set(PLANET_CENTER.x, PLANET_CY, PLANET_CENTER.y);
   group.add(planet);
+  // Faint atmosphere glow — additive + back-side so it's brightest at the rim
+  // and only vaguely visible over the disc (a subtle blue haze, not a solid ball).
+  const atmo = new THREE.Mesh(
+    new THREE.SphereGeometry(PLANET_R + ATMO_THICKNESS, 64, 48),
+    new THREE.MeshBasicMaterial({
+      color: 0x5aa0ff, transparent: true, opacity: 0.06,
+      side: THREE.BackSide, depthWrite: false, blending: THREE.AdditiveBlending,
+    }),
+  );
+  atmo.position.set(PLANET_CENTER.x, PLANET_CY, PLANET_CENTER.y);
+  group.add(atmo);
   // Apron height where the base sits (top of the cap near the base location).
   const apronY = PLANET_CY + Math.sqrt(PLANET_R * PLANET_R - (BASE_POS.x * BASE_POS.x + BASE_POS.z * BASE_POS.z));
 

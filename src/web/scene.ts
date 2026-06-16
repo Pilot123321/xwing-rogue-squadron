@@ -23,7 +23,7 @@ import { buildCockpit, type Cockpit } from "./cockpit.ts";
 import { drawRadar, type Blip } from "./radar.ts";
 import { buildXWing, type XWing } from "./xwing.ts";
 import type { ShipSnapshot, FireEvent } from "./net.ts";
-import { buildSurface, PLANET_R, PLANET_CY, PLANET_CENTER } from "./surface.ts";
+import { buildSurface, PLANET_R, PLANET_CY, PLANET_CENTER, ATMO_THICKNESS, DS_SPHERE_R, DS_SPHERE_CENTER, DS_TRENCH_W, DS_TRENCH_DEPTH } from "./surface.ts";
 import { GroundTargets } from "./ground.ts";
 
 export type ViewMode = "chase" | "cockpit";
@@ -50,12 +50,24 @@ export interface HudData {
   // gunReticle = where bolts actually go (boresight + inherited velocity).
   prograde?: { x: number; y: number; behind: boolean };
   gunReticle?: { x: number; y: number; behind: boolean };
+  // Hornet A/A gun cues
+  closure?: number; // target closing rate (m/s, + = closing) — null if no lock
+  shoot?: boolean; // firing solution satisfied (Hornet SHOOT cue)
+  gunRange?: number; // gun max effective range (m) for the reticle range arc
+  heading?: number; // ship heading 0..360 for the HUD heading tape
   lock?: { state: "searching" | "locked"; progress: number };
+  // Aim-assist gate circle around a locked target (screen px); active = reticle inside.
+  assistCircle?: { x: number; y: number; r: number; active: boolean };
   agl?: number | null; // height above the surface, or null in open space
   landed?: boolean;
   a2g?: { x: number; y: number; behind: boolean; dist: number } | null; // ground designation
   gear?: boolean;
   vtol?: boolean;
+  // Atmospheric flight cues (only meaningful inside the planet's air).
+  inAtmo?: boolean;
+  aoa?: number;
+  gLoad?: number;
+  stalled?: boolean;
   // Right-side kill feed: newest last; alpha fades as it expires.
   feed?: { text: string; color: string; alpha: number }[];
   // Target reticle (screen px) + lead pip, present when a target is locked & on-screen.
@@ -65,11 +77,12 @@ export interface HudData {
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BOLT_SPEED = 2600;
+const GUN_RMAX = 3000; // gun max effective range (Hornet A/A gun reticle range arc)
 
 // Real-world phenomena near a celestial body: gravity well + atmospheric drag.
 // In open space there is neither (frictionless vacuum, pure Newtonian).
-const ATMO_TOP = 1500; // AGL where the atmosphere fades to vacuum (arena above stays vacuum)
-const G_SURF = 24; // m/s^2 surface gravity
+const G_SURF = 26; // m/s^2 surface gravity (at the planet surface)
+const PLANET_CENTER3 = new THREE.Vector3(PLANET_CENTER.x, PLANET_CY, PLANET_CENTER.y);
 
 export class Scene3D {
   readonly scene = new THREE.Scene();
@@ -121,6 +134,7 @@ export class Scene3D {
   private lockProgress = 0; // 0..1 building toward a hard lock
   private hardLock = false;
   private autoLock = true; // auto-acquire nearest TIE; toggle off for manual targeting
+  private aimAssistActive = false; // true when the boresight reticle is inside the lock circle
   private prevHardLock = false;
   private raycaster = new THREE.Raycaster();
 
@@ -131,6 +145,7 @@ export class Scene3D {
   // Solid celestial bodies you crash into if you penetrate their surface.
   private crashSpheres: { c: THREE.Vector3; r: number }[] = [];
   private prevPos = new THREE.Vector3();
+  private _dsRel = new THREE.Vector3();
   private groundTargets!: GroundTargets;
   // Player collision: half-extents of the X-wing hull (wingspan x, thin y/z).
   private readonly playerHalf = new THREE.Vector3(7, 3, 11);
@@ -202,9 +217,12 @@ export class Scene3D {
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
-    // Lighting: a key "sun" + soft fill so models read in the dark.
-    const sun = new THREE.DirectionalLight(0xfff2e0, 2.6);
-    sun.position.set(0.5, 0.8, 0.3);
+    // Lighting: a key "sun" + soft fill so models read in the dark. The visible
+    // sun (built in space.ts) sits far away along this same direction so the
+    // highlights/shadows on the ships line up with where the sun actually is.
+    const sunDir = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+    const sun = new THREE.DirectionalLight(0xfff4e0, 2.7);
+    sun.position.copy(sunDir);
     this.scene.add(sun);
     this.scene.add(new THREE.HemisphereLight(0x404a66, 0x080810, 0.7));
     this.scene.add(new THREE.AmbientLight(0x223044, 0.6));
@@ -316,18 +334,14 @@ export class Scene3D {
 
     // A missile is always fatal — straight to the boom, no fire stage.
     if (kind === "missile") {
-      this.shields = 0; this.hull = 0;
+      this.hull = 0;
       this.killPlayer();
       return;
     }
 
+    // No shields — all damage hits the hull directly.
     const hullBefore = this.hull;
-    if (this.shields > 0) {
-      this.shields -= dmg;
-      if (this.shields < 0) { this.hull += this.shields; this.shields = 0; }
-    } else {
-      this.hull -= dmg;
-    }
+    this.hull -= dmg;
     // Count gun hits that bit into the hull; after ~3, the ship catches fire.
     if (this.hull < hullBefore) {
       this.gunHits++;
@@ -400,7 +414,7 @@ export class Scene3D {
     this.player.group.position.set(0, 0, 0);
     this.player.group.quaternion.identity();
     this.player.resetMotion(320);
-    this.hull = 100; this.shields = 100;
+    this.hull = 100;
     this.laserHeat = 0; this.overheated = false;
     this.removeDamageFire();
     this.player.group.visible = true;
@@ -418,20 +432,18 @@ export class Scene3D {
     const vel = this.player.velocity();
     const fwd = this.player.forward();
 
-    // Gun aim-assist: if a target is locked and roughly ahead, converge the
-    // bolts onto the intercept solution so you only have to point NEAR it.
-    // Bolts still inherit ship velocity; outside the cone they fire boresight.
+    // Gun aim-assist: bolts converge onto the locked target's intercept solution
+    // ONLY while your boresight reticle is inside the on-screen lock circle
+    // (computed each frame in composeHud). Otherwise they fire straight boresight.
     let aimDir = fwd;
     const info = this.lockedId != null ? this.enemies.info(this.lockedId) : null;
-    if (info) {
+    if (info && this.aimAssistActive) {
       const rel = info.position.clone().sub(this.player.group.position);
-      if (rel.clone().normalize().dot(fwd) > 0.94 && rel.length() < 3500) { // ~20deg cone, in range
-        const relVel = info.velocity.clone().sub(this.player.vel);
-        const tHit = this.interceptTime(rel, relVel, BOLT_SPEED);
-        if (tHit != null) {
-          aimDir = info.position.clone().addScaledVector(info.velocity, tHit)
-            .sub(this.player.group.position).normalize();
-        }
+      const relVel = info.velocity.clone().sub(this.player.vel);
+      const tHit = this.interceptTime(rel, relVel, BOLT_SPEED);
+      if (tHit != null) {
+        aimDir = info.position.clone().addScaledVector(info.velocity, tHit)
+          .sub(this.player.group.position).normalize();
       }
     }
 
@@ -593,16 +605,25 @@ export class Scene3D {
    * frictionless vacuum in open space. You must hold thrust (or hover in VTOL)
    * to stay aloft near the deck.
    */
+  /** Air density 0..1 at the player (0 = vacuum, 1 = planet surface). */
+  private atmoDensity(): number {
+    const d = this.tmp.copy(PLANET_CENTER3).sub(this.player.group.position).length();
+    const alt = d - PLANET_R;
+    if (alt < 0 || alt > ATMO_THICKNESS) return 0;
+    return 1 - alt / ATMO_THICKNESS;
+  }
+
   private applyEnvironment(dt: number): void {
+    // Gravity well inside the GREEN PLANET's atmosphere (aerodynamic drag/lift are
+    // handled in the ship's atmospheric flight model). Open space stays vacuum.
     const pos = this.player.group.position;
-    const gh = this.surfaceHeightAt(pos.x, pos.z);
-    if (!Number.isFinite(gh)) return; // vacuum — nothing to do
-    const alt = Math.max(0, pos.y - gh);
-    const density = Math.max(0, 1 - alt / ATMO_TOP);
-    if (density <= 0) return;
-    // Gravity only — pulls you toward the surface so a dive ACCELERATES. No
-    // velocity-killing drag (that made diving feel like braking).
-    this.player.vel.y -= G_SURF * density * dt;
+    const toCenter = this.tmp.copy(PLANET_CENTER3).sub(pos);
+    const d = toCenter.length();
+    const alt = d - PLANET_R;
+    if (alt < 0 || alt > ATMO_THICKNESS) return;
+    const density = 1 - alt / ATMO_THICKNESS;
+    // Accelerate radially toward the planet centre (so a dive speeds up).
+    this.player.vel.addScaledVector(toCenter.divideScalar(d || 1), G_SURF * density * dt);
   }
 
   /** Planet / Death Star surface: ground collision, landing, base repair. */
@@ -636,8 +657,7 @@ export class Scene3D {
       let nearPad = Infinity;
       for (const pad of this.pads) nearPad = Math.min(nearPad, Math.hypot(pos.x - pad.x, pos.z - pad.z));
       if (nearPad < 480) {
-        this.hull = Math.min(100, this.hull + 20 * dt);
-        this.shields = Math.min(100, this.shields + 26 * dt);
+        this.hull = Math.min(100, this.hull + 24 * dt);
         this.torps = 8;
         if (this.hull > 80) this.removeDamageFire(); // repaired enough to snuff the fire
         this.flash("DOCKED — REPAIRING & REARMING", 0.4);
@@ -707,8 +727,20 @@ export class Scene3D {
       for (const sph of this.crashSpheres) {
         if (p.distanceTo(sph.c) < sph.r - 35) return true;
       }
+      // The Death Star is solid EXCEPT inside its equatorial trench channel.
+      if (this.deathStarHit(p)) return true;
     }
     return false;
+  }
+
+  /** Solid Death Star, with the equatorial trench cut out so you can fly it. */
+  private deathStarHit(p: THREE.Vector3): boolean {
+    const rel = this._dsRel.copy(p).sub(DS_SPHERE_CENTER);
+    const d = rel.length();
+    if (d > DS_SPHERE_R - 9 || d < 1) return false; // outside the shell → free space
+    // In the trench band? (near the equatorial plane, within the cut depth)
+    const inTrench = Math.abs(rel.y) < DS_TRENCH_W - 12 && d > DS_SPHERE_R - DS_TRENCH_DEPTH;
+    return !inTrench; // solid hull everywhere except the open trench channel
   }
 
   /**
@@ -750,14 +782,10 @@ export class Scene3D {
       if (t >= this.respawnAt) this.respawn(this.lives <= 0);
     } else {
       this.prevPos.copy(this.player.group.position); // for swept collision
-      this.player.update(controls, dt);
+      this.player.update(controls, dt, this.atmoDensity());
       // The sublight accelerator only works with the S-foils folded.
       if (controls.boost && this.player.sfoilsOpen) this.flash("FOLD S-FOILS FOR SUBLIGHT", 0.6);
       this.timeSinceHit += dt;
-      // shield regen after a few seconds without being hit
-      if (this.timeSinceHit > 4 && this.shields < 100) {
-        this.shields = Math.min(100, this.shields + 8 * dt);
-      }
       // laser cooling
       this.laserHeat = Math.max(0, this.laserHeat - dt * 0.35);
       if (this.overheated && this.laserHeat < 0.3) this.overheated = false;
@@ -804,7 +832,12 @@ export class Scene3D {
       ? [...this.enemies.combatants, ...this.groundTargets.combatants]
       : [this.playerCombatant, ...this.enemies.combatants, ...this.groundTargets.combatants];
     this.blasters.update(dt, combatants);
-    this.groundTargets.update();
+    // Death Star turrets aim + fire green bolts at the player.
+    const pRef = { position: this.player.group.position, velocity: this.player.velocity(this.tmp).clone() };
+    this.groundTargets.update(dt, pRef, (origin, dir) => {
+      this.blasters.fire(origin, dir, this.tmp2.set(0, 0, 0), "enemy", 9);
+      this.onEnemyFire?.();
+    });
 
     // Ramming a TIE (or a ground turret/port) destroys it — and crashes you.
     if (!this.dead) {
@@ -930,7 +963,7 @@ export class Scene3D {
     h.throttle = this.lastThrottle;
     h.flightAssist = this.player.flightAssist;
     h.hull = Math.max(0, Math.round(this.hull));
-    h.shields = Math.max(0, Math.round(this.shields));
+    h.shields = 0;
     h.score = this.score;
     h.wave = this.wave;
     h.lives = this.lives;
@@ -944,6 +977,10 @@ export class Scene3D {
     h.landed = this.landed;
     h.gear = this.player.gearDown;
     h.vtol = this.player.vtol;
+    h.inAtmo = this.player.inAtmo;
+    h.aoa = this.player.aoaDeg;
+    h.gLoad = this.player.gLoad;
+    h.stalled = this.player.stalled;
     this.feed = this.feed.filter((f) => f.until > t);
     h.feed = this.feed.map((f) => ({ text: f.text, color: f.color, alpha: Math.min(1, (f.until - t) / 0.8) }));
     h.a2g = null;
@@ -956,6 +993,19 @@ export class Scene3D {
     h.target = undefined;
     h.lock = undefined;
     const pp = this.player.group.position;
+
+    // Green gun aimer (velocity-compensated pipper) — where your bolts actually
+    // go. Computed first so the lock circle can gate off it.
+    h.prograde = undefined;
+    h.gunReticle = undefined;
+    if (this.player.vel.lengthSq() > 1) {
+      const pg = this.project(this.tmp.copy(this.player.vel).normalize().multiplyScalar(3000).add(pp));
+      h.prograde = { x: pg.x, y: pg.y, behind: pg.behind };
+    }
+    const boltVel = this.player.forward().multiplyScalar(BOLT_SPEED).add(this.player.vel).normalize();
+    const gr = this.project(boltVel.multiplyScalar(3000).add(pp));
+    h.gunReticle = { x: gr.x, y: gr.y, behind: gr.behind };
+
     const info = this.lockedId != null ? this.enemies.info(this.lockedId) : null;
     if (info) {
       h.lock = { state: this.hardLock ? "locked" : "searching", progress: this.lockProgress };
@@ -972,24 +1022,33 @@ export class Scene3D {
         if (!lp.behind) lead = { x: lp.x, y: lp.y };
       }
       h.target = { x: box.x, y: box.y, dist, behind: box.behind, lead };
-    }
 
-    // Velocity (prograde) marker + velocity-compensated gun pipper.
-    h.prograde = undefined;
-    h.gunReticle = undefined;
-    if (this.player.vel.lengthSq() > 1) {
-      const pg = this.project(this.tmp.copy(this.player.vel).normalize().multiplyScalar(3000).add(pp));
-      h.prograde = { x: pg.x, y: pg.y, behind: pg.behind };
+      // Aim-assist gate circle: a ring around the locked TIE. Lasers converge
+      // while the GREEN GUN AIMER (the pipper) sits inside it and the target is
+      // in range and ahead. Bigger = more forgiving to shoot.
+      const R = 70;
+      const inside = !box.behind && !gr.behind && dist < 3700
+        && Math.hypot(box.x - gr.x, box.y - gr.y) < R;
+      this.aimAssistActive = inside;
+      if (!box.behind) h.assistCircle = { x: box.x, y: box.y, r: R, active: inside };
+
+      // Hornet gun cues: closure rate, gun-range arc, and the SHOOT solution.
+      const los = relPos.clone().normalize();
+      h.closure = -relVel.dot(los); // + = closing
+      h.gunRange = GUN_RMAX;
+      h.shoot = inside && dist < GUN_RMAX;
+    } else {
+      this.aimAssistActive = false;
+      h.closure = undefined; h.shoot = false; h.gunRange = undefined;
     }
-    // Bolt absolute velocity = nose * muzzle speed + ship velocity.
-    const boltVel = this.player.forward().multiplyScalar(BOLT_SPEED).add(this.player.vel).normalize();
-    const gr = this.project(boltVel.multiplyScalar(3000).add(pp));
-    h.gunReticle = { x: gr.x, y: gr.y, behind: gr.behind };
+    // HUD heading tape: world -Z = 000 (north), +X = 090.
+    const fwd2 = this.player.forward(this.tmp);
+    h.heading = (Math.atan2(fwd2.x, -fwd2.z) * 180 / Math.PI + 360) % 360;
 
     // Radar contacts + cockpit instruments.
     this.updateRadar();
     h.blips = this.blips;
-    this.cockpit.setBars(this.shields, this.hull, Math.min(1, h.throttle));
+    this.cockpit.setBars(this.hull, Math.min(1, h.throttle));
   }
 
   /** Build player-local radar blips and refresh the cockpit scope texture. */

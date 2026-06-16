@@ -18,7 +18,7 @@ export interface Cockpit {
   group: THREE.Group;
   scopeCanvas: HTMLCanvasElement;
   scopeTex: THREE.CanvasTexture;
-  setBars(shields: number, hull: number, throttle: number): void;
+  setBars(hull: number, throttle: number): void;
   buttons: { id: string; mesh: THREE.Mesh }[];
   setIndicator(id: string, on: boolean): void;
   press(id: string): void;
@@ -110,13 +110,9 @@ export function buildCockpit(): Cockpit {
   group.add(sill);
 
   // ------------------------------------------------------------ instruments
-  // Glareshield raised well clear so it no longer overhangs the screens, and the
-  // whole instrument cluster sits lower on the panel — radar + MFDs in full view.
-  const hood = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.18, 0.55), FRAME);
-  hood.position.set(0, 0.86, -2.42); hood.rotation.x = -0.25;
-  group.add(hood);
-  const panel = new THREE.Mesh(new THREE.BoxGeometry(2.7, 1.1, 0.14), PANEL);
-  panel.position.set(0, 0.05, -2.36); panel.rotation.x = -0.5;
+  // (Glareshield hood removed — it was the big bar across the front view.)
+  const panel = new THREE.Mesh(new THREE.BoxGeometry(2.7, 1.3, 0.14), PANEL);
+  panel.position.set(0, -0.05, -2.36); panel.rotation.x = -0.5;
   group.add(panel);
 
   // central sensor scope (canvas texture, refreshed by the game)
@@ -164,10 +160,9 @@ export function buildCockpit(): Cockpit {
     fill.position.set(x, -0.12, -2.21); fill.rotation.x = -0.5; group.add(fill);
     return fill;
   };
-  // Bars sit in a strip low-centre, below the radar.
-  const shieldBar = mkBar(-0.16, 0x46d8ff);
-  const hullBar = mkBar(0.0, 0x5dff7a);
-  const thrBar = mkBar(0.16, 0xffb627);
+  // Bars on the lower-left of the panel (clear of the central button bank).
+  const hullBar = mkBar(-0.98, 0x5dff7a);
+  const thrBar = mkBar(-0.84, 0xffb627);
 
   // control stick (between knees), throttle quadrant, knobs, rudder pedals
   const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.055, 0.6, 20), TRIM);
@@ -182,65 +177,40 @@ export function buildCockpit(): Cockpit {
   }
 
   // ------------------------------------------------------- functional buttons
-  // Moved OFF the front panel onto the side consoles so the radar + MFDs have the
-  // whole front face. Four per console, mounted on the angled console tops facing
-  // up toward the pilot (left bank = combat, right bank = systems).
-  const LEFT_BTNS: [string, string][] = [
-    ["SFOIL", "S-FOIL"], ["ASSIST", "ASSIST"], ["TARGET", "TARGET"],
-  ];
-  const RIGHT_BTNS: [string, string][] = [
-    ["VIEW", "VIEW"], ["GEAR", "GEAR"], ["BOMB", "A/G BOMB"], ["AUTO", "AUTO TGT"],
-  ];
+  // A clean bank of clickable buttons across the LOWER FRONT PANEL, directly in
+  // the pilot's forward gaze and angled to face them — every one is raycast-
+  // pickable. Big square keys with a label and an indicator light.
   const buttons: { id: string; mesh: THREE.Mesh }[] = [];
   const lights = new Map<string, THREE.Mesh>();
   const bodies = new Map<string, THREE.Mesh>();
   const pressUntil = new Map<string, number>();
 
-  const mkButton = (id: string, label: string, side: number, i: number) => {
+  const mkButton = (id: string, label: string, col: number, row: number) => {
     const bg = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.16, 0.07),
-      new THREE.MeshStandardMaterial({ color: 0x2a2e34, roughness: 0.6, metalness: 0.35 }));
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.2, 0.08),
+      new THREE.MeshStandardMaterial({ color: 0x2c3036, roughness: 0.55, metalness: 0.4 }));
     body.userData.cockpitButton = id;
     bg.add(body);
-    const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.09),
+    const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.12),
       new THREE.MeshBasicMaterial({ map: makeLabel(label) }));
-    lab.position.z = 0.04; bg.add(lab);
-    const light = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.026, 0.075),
-      new THREE.MeshStandardMaterial({ color: 0x224422, emissive: 0x000000 }));
-    light.position.y = 0.095; bg.add(light);
-    // Lie flat on the console top (label faces up), tilted with the console and
-    // angled slightly toward the pilot so the labels are readable.
-    bg.position.set(side * 1.16, 0.5, -1.6 + i * 0.32);
-    bg.rotation.set(-1.05, 0, side * 0.16);
+    lab.position.z = 0.045; bg.add(lab);
+    const light = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.025),
+      new THREE.MeshBasicMaterial({ color: 0x224422 }));
+    light.position.set(0, -0.07, 0.046); bg.add(light);
+    // 3 columns × 2 rows centred on the lower front panel, facing the pilot.
+    bg.position.set(-0.36 + col * 0.36, -0.16 - row * 0.26, -2.06 + row * 0.12);
+    bg.rotation.x = -0.5; // match the panel rake so labels face up toward the pilot
     group.add(bg);
     buttons.push({ id, mesh: body });
     lights.set(id, light);
     bodies.set(id, body);
   };
-  LEFT_BTNS.forEach(([id, label], i) => mkButton(id, label, -1, i));
-  RIGHT_BTNS.forEach(([id, label], i) => mkButton(id, label, 1, i));
-
-  // --- Side instrument panels: ONE clean MFD per console, laid flat. ---
-  // Deliberately minimal (a screen with a few data rows) so the consoles read
-  // tidy instead of a jumble of switches and gauges.
-  const buildSidePanel = (side: number): THREE.Group => {
-    const g = new THREE.Group();
-    const back = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.66, 0.04), PANEL);
-    g.add(back);
-    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.4),
-      new THREE.MeshBasicMaterial({ color: side < 0 ? 0x0c2a1a : 0x07283a }));
-    screen.position.set(0, 0.04, 0.03); g.add(screen);
-    for (let r = 0; r < 4; r++) {
-      const row = new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.03), litPanel(side < 0 ? 0x33ff88 : 0x46d8ff));
-      row.position.set(0, 0.15 - r * 0.08, 0.04); g.add(row);
-    }
-    // Flat panel by the pilot's left/right hand (glance down to read it).
-    g.position.set(side * 0.82, 0.16, -0.35);
-    g.rotation.set(-Math.PI / 2, 0, side * 0.1);
-    return g;
-  };
-  group.add(buildSidePanel(-1));
-  group.add(buildSidePanel(1));
+  // Combat row + systems row. (FIRE = stick trigger, GEAR = lever, VTOL = dial.)
+  const BANK: [string, string][] = [
+    ["SFOIL", "S-FOIL"], ["ASSIST", "ASSIST"], ["TARGET", "TARGET"],
+    ["AUTO", "AUTO"], ["BOMB", "BOMB"], ["VIEW", "VIEW"],
+  ];
+  BANK.forEach(([id, label], i) => mkButton(id, label, i % 3, Math.floor(i / 3)));
 
   // --- Trigger: red circular fire button on top of the control stick ---
   const fireRing = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.018, 12, 28),
@@ -288,7 +258,7 @@ export function buildCockpit(): Cockpit {
   vtolPtr.position.z = 0.02;
   vtolPtr.rotation.z = 1.0; // default OFF (pointing up-left)
   vtolDial.add(vtolPtr);
-  vtolDial.position.set(0.44, -0.08, -2.24);
+  vtolDial.position.set(0.92, -0.14, -2.18);
   vtolDial.rotation.x = -0.5;
   group.add(vtolDial);
   buttons.push({ id: "VTOL", mesh: dialFace });
@@ -316,9 +286,8 @@ export function buildCockpit(): Cockpit {
     setIndicator(id, on) {
       const light = lights.get(id);
       if (!light) return;
-      const m = light.material as THREE.MeshStandardMaterial;
-      m.emissive.setHex(on ? 0x33ff66 : 0x000000);
-      m.color.setHex(on ? 0x66ffaa : 0x224422);
+      // The bank lights are MeshBasicMaterial (no emissive) — just swap colour.
+      (light.material as THREE.MeshBasicMaterial).color.setHex(on ? 0x66ffaa : 0x224422);
     },
     press(id) { pressUntil.set(id, performance.now() + 130); },
     setHover(id) {
@@ -332,14 +301,13 @@ export function buildCockpit(): Cockpit {
         body.position.z += ((pressed ? -0.05 : 0) - body.position.z) * 0.4;
       }
     },
-    setBars(shields, hull, throttle) {
-      // Bars: base y=0.06, full height 0.24 -> anchor the fill at the bottom.
+    setBars(hull, throttle) {
+      // Anchor each fill at the bottom of its slot as it shrinks.
       const set = (m: THREE.Mesh, frac: number) => {
         const f = Math.max(0.001, Math.min(1, frac));
         m.scale.y = f;
         m.position.y = (-0.12 - 0.12) + 0.12 * f;
       };
-      set(shieldBar, shields / 100);
       set(hullBar, hull / 100);
       set(thrBar, throttle);
     },

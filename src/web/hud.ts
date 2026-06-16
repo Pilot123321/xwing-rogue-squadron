@@ -76,17 +76,37 @@ export class HUD {
     ctx.stroke();
     ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.stroke();
 
-    // --- Gun pipper: where bolts actually fly (boresight + inherited velocity) ---
+    // --- Hornet A/A gun reticle (green): a 50-mil circle + centre pipper at the
+    // gun aimer, with a closing target-range ARC around it (full = max range,
+    // shrinks as the target closes). Plus the SHOOT cue when the solution is good. ---
     if (d.gunReticle && !d.gunReticle.behind) {
       const g = d.gunReticle;
-      ctx.strokeStyle = AMBER;
+      const rad = 26;
+      ctx.strokeStyle = GREEN; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(g.x, g.y, rad, 0, Math.PI * 2); ctx.stroke();
+      // centre pipper
+      ctx.fillStyle = GREEN;
+      ctx.beginPath(); ctx.arc(g.x, g.y, 2.4, 0, Math.PI * 2); ctx.fill();
+      // range arc: starts at 12 o'clock, sweeps clockwise; length = range/Rmax
+      if (d.gunRange && d.target && !d.target.behind) {
+        const frac = Math.max(0, Math.min(1, 1 - d.target.dist / d.gunRange));
+        if (frac > 0) {
+          ctx.strokeStyle = d.shoot ? RED : GREEN;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(g.x, g.y, rad + 5, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+      // SHOOT cue
+      if (d.shoot) {
+        ctx.fillStyle = RED;
+        ctx.font = "bold 18px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("SHOOT", g.x, g.y - rad - 16);
+        ctx.font = "15px monospace";
+      }
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(g.x, g.y - 9); ctx.lineTo(g.x + 9, g.y);
-      ctx.lineTo(g.x, g.y + 9); ctx.lineTo(g.x - 9, g.y); ctx.closePath();
-      ctx.stroke();
-      ctx.fillStyle = AMBER;
-      ctx.beginPath(); ctx.arc(g.x, g.y, 1.8, 0, Math.PI * 2); ctx.fill();
     }
 
     // --- Prograde marker: the velocity vector (where you're actually moving) ---
@@ -100,6 +120,30 @@ export class HUD {
       ctx.moveTo(p.x + 7, p.y); ctx.lineTo(p.x + 13, p.y);
       ctx.moveTo(p.x, p.y - 7); ctx.lineTo(p.x, p.y - 13);
       ctx.stroke();
+    }
+
+    // --- Hornet airspeed box (left of centre) ---
+    ctx.strokeStyle = GREEN; ctx.fillStyle = GREEN; ctx.lineWidth = 1.5;
+    ctx.font = "20px monospace"; ctx.textAlign = "right";
+    ctx.strokeRect(cx - 210, cy - 18, 78, 36);
+    ctx.fillText(`${Math.round(d.speed)}`, cx - 138, cy);
+    ctx.font = "12px monospace"; ctx.textAlign = "center";
+    ctx.fillText("M/S", cx - 171, cy - 28);
+
+    // (Heading tape removed — there's no absolute compass direction in space.)
+    ctx.lineWidth = 2;
+
+    // --- Aim-assist gate circle around the locked target ---
+    if (d.assistCircle) {
+      const a = d.assistCircle;
+      ctx.strokeStyle = a.active ? GREEN : "rgba(150,170,185,0.5)";
+      ctx.lineWidth = a.active ? 2.5 : 1.5;
+      ctx.setLineDash(a.active ? [] : [5, 5]);
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineWidth = 2;
     }
 
     // --- Target box + lead pip ---
@@ -129,9 +173,14 @@ export class HUD {
           ctx.lineTo(x + sx * s - sx * 8, y + sy * s);
         }
         ctx.stroke();
+        // Hornet TD data: target range (100s of ft style → here metres) + closure.
         ctx.fillStyle = inRange ? RED : AMBER;
         ctx.textAlign = "left";
         ctx.fillText(`${Math.round(dist)}m`, x + s + 4, y - s);
+        if (d.closure != null) {
+          const c = Math.round(d.closure);
+          ctx.fillText(`${c >= 0 ? "+" : ""}${c} m/s`, x + s + 4, y - s + 18);
+        }
         // lead pip
         if (d.target.lead) {
           ctx.strokeStyle = GREEN;
@@ -171,8 +220,7 @@ export class HUD {
       }
     }
 
-    // --- Left: shields / hull bars ---
-    this.bar(30, H - 120, "SHIELDS", d.shields / 100, CYAN);
+    // --- Left: hull / laser bars (shields removed) ---
     this.bar(30, H - 92, "HULL", d.hull / 100, d.hull > 30 ? GREEN : RED);
     this.bar(30, H - 64, "LASER", 1 - d.laserHeat, d.laserHeat > 0.8 ? RED : AMBER);
 
@@ -185,6 +233,33 @@ export class HUD {
       if (d.landed) {
         ctx.fillStyle = GREEN;
         ctx.fillText("● LANDED", 110, H - 150);
+      }
+    }
+
+    // --- Atmospheric flight cues (only in the planet's air): G load, AoA, and
+    // an on-speed AoA bracket (~8.1° Hornet on-speed), plus a STALL warning. ---
+    if (d.inAtmo) {
+      ctx.textAlign = "left";
+      ctx.font = "15px monospace";
+      const g = d.gLoad ?? 1, aoa = d.aoa ?? 0;
+      ctx.fillStyle = g > 7.5 ? RED : GREEN;
+      ctx.fillText(`G ${g.toFixed(1)}`, 30, H - 200);
+      ctx.fillStyle = aoa > 22 ? RED : (aoa > 14 ? AMBER : GREEN);
+      ctx.fillText(`AOA ${Math.round(aoa)}°`, 30, H - 178);
+      // On-speed AoA bracket on the left of the velocity vector (E-bracket).
+      if (d.prograde && !d.prograde.behind) {
+        const p = d.prograde, bx = p.x - 26;
+        const onSpeed = aoa >= 6 && aoa <= 10;
+        ctx.strokeStyle = onSpeed ? GREEN : (aoa > 10 ? RED : AMBER);
+        ctx.lineWidth = 2;
+        ctx.beginPath(); // chevron pointing right (on-speed indexer)
+        ctx.moveTo(bx - 8, p.y - 9); ctx.lineTo(bx, p.y); ctx.lineTo(bx - 8, p.y + 9);
+        ctx.stroke();
+      }
+      if (d.stalled) {
+        ctx.fillStyle = RED; ctx.font = "bold 22px monospace"; ctx.textAlign = "center";
+        ctx.fillText("STALL", cx, cy + 150);
+        ctx.font = "15px monospace";
       }
     }
 
