@@ -935,8 +935,14 @@ var PlayerShip = class {
       this.vel.multiplyScalar(Math.max(0, 1 - AIR_DRAG * atmo * (sp2 / DRAG_REF) * dt));
     } else {
       const target = boost ? BOOST_SPEED : c.throttle * CRUISE_SPEED;
-      const desired = this._v.copy(nose).multiplyScalar(target);
-      this.vel.lerp(desired, 1 - Math.exp(-dt * 2));
+      const sp = this.vel.length();
+      const newSp = sp + (target - sp) * (1 - Math.exp(-dt * 1.6));
+      if (sp > 1) {
+        const dir = this._v.copy(this.vel).divideScalar(sp).lerp(nose, 1 - Math.exp(-dt * 2.4)).normalize();
+        this.vel.copy(dir).multiplyScalar(newSp);
+      } else {
+        this.vel.copy(nose).multiplyScalar(newSp);
+      }
     }
     this.group.position.addScaledVector(this.vel, dt);
     this.sfoils += (this.sfoilsTarget - this.sfoils) * (1 - Math.exp(-dt * 6));
