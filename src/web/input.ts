@@ -20,9 +20,21 @@
 
 import type { Controls } from "./ship.ts";
 
+// How fast keyboard axes ramp toward full deflection (higher = snappier).
+const KEY_RAMP = 9;
+// Expo curve for analog sticks: gentle near centre, full authority at the edge.
+const EXPO = 0.55;
+function expo(v: number): number {
+  return EXPO * v * v * v + (1 - EXPO) * v;
+}
+
 export class InputManager {
   private keys = new Set<string>();
   private throttle = 0.55;
+  // Smoothed (ramped) keyboard axes — gives an analog feel from on/off keys.
+  private smPitch = 0;
+  private smRoll = 0;
+  private smYaw = 0;
 
   // Touch / on-screen controls (set by the mobile UI). Axes are -1..1, throttle
   // is absolute 0..1 (or null to leave keyboard in charge), gun/boost are held.
@@ -77,15 +89,27 @@ export class InputManager {
     if (this.k("shift")) this.throttle = Math.min(1, this.throttle + 0.6 * dt);
     if (this.k("control", "ctrl")) this.throttle = Math.max(0, this.throttle - 0.6 * dt);
 
-    let pitch = 0, roll = 0, yaw = 0;
-    if (this.k("w", "arrowup")) pitch += 1;
-    if (this.k("s", "arrowdown")) pitch -= 1;
-    if (this.k("d", "arrowright")) roll += 1;
-    if (this.k("a", "arrowleft")) roll -= 1;
-    if (this.k("e")) yaw += 1;
-    if (this.k("q")) yaw -= 1;
+    // --- Keyboard: ramp toward the key target instead of snapping to ±1, so it
+    // feels analog (smooth) rather than twitchy. Decays back to centre on release. ---
+    let kp = 0, kr = 0, ky = 0;
+    if (this.k("w", "arrowup")) kp += 1;
+    if (this.k("s", "arrowdown")) kp -= 1;
+    if (this.k("d", "arrowright")) kr += 1;
+    if (this.k("a", "arrowleft")) kr -= 1;
+    if (this.k("e")) ky += 1;
+    if (this.k("q")) ky -= 1;
+    const ramp = 1 - Math.exp(-dt * KEY_RAMP);
+    this.smPitch += (kp - this.smPitch) * ramp;
+    this.smRoll += (kr - this.smRoll) * ramp;
+    this.smYaw += (ky - this.smYaw) * ramp;
+    if (Math.abs(this.smPitch) < 0.002) this.smPitch = 0;
+    if (Math.abs(this.smRoll) < 0.002) this.smRoll = 0;
+    if (Math.abs(this.smYaw) < 0.002) this.smYaw = 0;
+    let pitch = this.smPitch, roll = this.smRoll, yaw = this.smYaw;
     let boost = this.k("z");
 
+    // --- Gamepad: deadzone + EXPO curve (gentle near centre, full at the edge)
+    // so fine aiming is possible. The physical stick is already analog. ---
     const pads = navigator.getGamepads?.() ?? [];
     const pad = pads.find((p) => p);
     if (pad) {
@@ -93,17 +117,17 @@ export class InputManager {
       const gpRoll = dz(pad.axes[0] ?? 0);
       const gpPitch = dz(pad.axes[1] ?? 0);
       const gpYaw = dz(pad.axes[2] ?? 0);
-      if (gpRoll) roll = gpRoll;
-      if (gpPitch) pitch = -gpPitch;
-      if (gpYaw) yaw = gpYaw;
+      if (gpRoll) roll = expo(gpRoll);
+      if (gpPitch) pitch = expo(-gpPitch);
+      if (gpYaw) yaw = expo(gpYaw);
       if (pad.buttons[7]?.pressed) boost = true;
     }
 
-    // On-screen touch controls override when deflected.
+    // --- On-screen touch (analog joystick) + expo for finer control. ---
     if (this.touch.active) {
-      if (this.touch.pitch) pitch = this.touch.pitch;
-      if (this.touch.roll) roll = this.touch.roll;
-      if (this.touch.yaw) yaw = this.touch.yaw;
+      if (this.touch.pitch) pitch = expo(this.touch.pitch);
+      if (this.touch.roll) roll = expo(this.touch.roll);
+      if (this.touch.yaw) yaw = expo(this.touch.yaw);
       if (this.touch.boost) boost = true;
       if (this.touch.throttle != null) this.throttle = this.touch.throttle;
     }

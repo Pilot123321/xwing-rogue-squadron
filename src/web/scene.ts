@@ -884,6 +884,7 @@ export class Scene3D {
     this.cockpit.setIndicator("AUTO", this.autoLock); // lit = auto target acquire
     this.cockpit.setGearLever(this.player.gearDown);
     this.cockpit.setVtolDial(this.player.vtol);
+    this.cockpit.setLockShoot(this.hardLock, !!this.hud.shoot);
     this.cockpit.update(performance.now());
 
     // Interpolate other players' ships toward their latest snapshots.

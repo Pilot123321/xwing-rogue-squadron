@@ -28,6 +28,8 @@ export interface Cockpit {
   setGearLever(down: boolean): void;
   /** Rotate the VTOL rotary dial to OFF/ON. */
   setVtolDial(on: boolean): void;
+  /** Hornet LOCK (radar lock) / SHOOT (firing solution) lights. */
+  setLockShoot(lock: boolean, shoot: boolean): void;
   /** Left MFD screen — the game points the targeting-pod TV feed at this. */
   tvScreen: THREE.Mesh;
 }
@@ -126,6 +128,21 @@ export function buildCockpit(): Cockpit {
   const bezel = new THREE.Mesh(new THREE.TorusGeometry(0.31, 0.04, 14, 32), TRIM);
   bezel.position.copy(scope.position); bezel.rotation.x = -0.5;
   group.add(bezel);
+
+  // Hornet LOCK / SHOOT lights at the top of the glareshield (manual p.52).
+  const mkLight = (x: number, label: string, offHex: number): THREE.Mesh => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.1, 0.04),
+      new THREE.MeshBasicMaterial({ color: offHex }));
+    m.position.set(x, 0.78, -2.4); m.rotation.x = -0.35;
+    group.add(m);
+    const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.08),
+      new THREE.MeshBasicMaterial({ map: makeLabel(label) }));
+    lab.position.set(x, 0.78, -2.378); lab.rotation.x = -0.35;
+    group.add(lab);
+    return m;
+  };
+  const lockLight = mkLight(-0.18, "LOCK", 0x3a3018);
+  const shootLight = mkLight(0.18, "SHOOT", 0x3a1414);
 
   // flanking MFD screens: LEFT = targeting-pod TV feed, RIGHT = decorative.
   let tvScreen!: THREE.Mesh;
@@ -283,6 +300,12 @@ export function buildCockpit(): Cockpit {
     group, scopeCanvas, scopeTex, buttons, tvScreen,
     setGearLever(down: boolean) { gearHandle.rotation.x = down ? 0.5 : -0.5; },
     setVtolDial(on: boolean) { vtolPtr.rotation.z = on ? -1.0 : 1.0; },
+    setLockShoot(lock: boolean, shoot: boolean) {
+      (lockLight.material as THREE.MeshBasicMaterial).color.setHex(lock ? 0xffb627 : 0x3a3018);
+      // SHOOT flashes when the solution is good.
+      const flash = shoot && (Math.floor(performance.now() / 150) % 2 === 0);
+      (shootLight.material as THREE.MeshBasicMaterial).color.setHex(flash ? 0x33ff55 : 0x3a1414);
+    },
     setIndicator(id, on) {
       const light = lights.get(id);
       if (!light) return;
