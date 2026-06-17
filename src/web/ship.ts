@@ -196,13 +196,21 @@ export class PlayerShip {
       const sp2 = this.vel.length();
       this.vel.multiplyScalar(Math.max(0, 1 - AIR_DRAG * atmo * (sp2 / DRAG_REF) * dt));
     } else {
-      // --- SPACE: the THROTTLE SETS YOUR SPEED. Velocity eases toward
-      //     nose × (throttle·cruise): raise the throttle to accelerate, pull it
-      //     back to decelerate; hold it steady and you COAST (no drag — you only
-      //     slow when you move the throttle). You fly where you point. Boost = max.
+      // --- SPACE: throttle sets your speed; turning never bleeds it (no drag).
+      //     Direction and magnitude are handled SEPARATELY so a turn keeps your
+      //     speed — speed only changes when you move the throttle. ---
       const target = boost ? BOOST_SPEED : c.throttle * CRUISE_SPEED;
-      const desired = this._v.copy(nose).multiplyScalar(target);
-      this.vel.lerp(desired, 1 - Math.exp(-dt * 2.0));
+      const sp = this.vel.length();
+      // Magnitude eases toward the throttle target (accelerate / decelerate).
+      const newSp = sp + (target - sp) * (1 - Math.exp(-dt * 1.6));
+      // Direction eases toward the nose, PRESERVING magnitude (no turn-drag).
+      if (sp > 1) {
+        const dir = this._v.copy(this.vel).divideScalar(sp)
+          .lerp(nose, 1 - Math.exp(-dt * 2.4)).normalize();
+        this.vel.copy(dir).multiplyScalar(newSp);
+      } else {
+        this.vel.copy(nose).multiplyScalar(newSp);
+      }
     }
     this.group.position.addScaledVector(this.vel, dt);
 
