@@ -270,11 +270,6 @@ export class HUD {
     ctx.strokeRect(tx, ty, tW, 12);
     ctx.fillRect(tx, ty, tW * Math.max(0, Math.min(1, d.throttle)), 12);
     ctx.fillText(`THR ${Math.round(d.throttle * 100)}%   ${Math.round(d.speed)} m/s   S-FOILS ${d.sfoils ? "ATTACK" : "CRUISE"}`, cx, ty - 14);
-    // Flight-assist status (RCS dampers). OFF = pure Newtonian.
-    ctx.fillStyle = d.flightAssist ? CYAN : RED;
-    ctx.font = "bold 14px monospace";
-    ctx.fillText(`FLIGHT ASSIST ${d.flightAssist ? "ON" : "OFF — NEWTONIAN"}`, cx, ty + 24);
-    ctx.font = "15px monospace";
     // Gear / VTOL status
     const states: string[] = [];
     if (d.gear) states.push("GEAR DOWN");

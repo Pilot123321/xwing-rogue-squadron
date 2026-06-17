@@ -41,8 +41,7 @@ const BOOST_ACCEL = 230; // m/s^2, sublight accelerator
 const RCS_LIN = 60; // m/s^2, RCS translational authority (assist only)
 
 // Rotational authority (pitch about X, yaw about Y, roll about Z).
-const ANG_ACCEL = new THREE.Vector3(2.4, 1.4, 4.8); // rad/s^2 (assist off: torque)
-const MAX_RATE = new THREE.Vector3(1.3, 0.85, 3.0); // rad/s (assist on: rate caps)
+const MAX_RATE = new THREE.Vector3(1.3, 0.85, 3.0); // rad/s rate caps (pitch, _, roll)
 
 // --- Atmospheric flight (only inside the planet's atmosphere) ---
 // Hornet-flavoured handling numbers from the F/A-18C guide: an AoA on-speed bracket,
@@ -67,7 +66,6 @@ export class PlayerShip {
   readonly vel = new THREE.Vector3(0, 0, -200);
   /** Angular velocity in the body frame (rad/s). Persists when assist is off. */
   readonly angVel = new THREE.Vector3();
-  flightAssist = true;
   /** True when the sublight accelerator actually engaged this frame. */
   boosting = false;
   gearDown = false;
@@ -99,7 +97,6 @@ export class PlayerShip {
 
   toggleSFoils(): void { this.sfoilsTarget = this.sfoilsTarget > 0.5 ? 0 : 1; }
   get sfoilsOpen(): boolean { return this.sfoilsTarget > 0.5; }
-  toggleFlightAssist(): void { this.flightAssist = !this.flightAssist; }
   toggleGear(): void { this.gearDown = !this.gearDown; this.model.setGear(this.gearDown); }
   toggleVtol(): void { this.vtol = !this.vtol; }
 
@@ -133,8 +130,8 @@ export class PlayerShip {
   }
 
   update(c: Controls, dt: number, atmo = 0): void {
-    // HOTAS pitch convention: push forward (W, pitch+) = nose down.
-    const wishX = -c.pitch, wishY = -c.yaw, wishZ = -c.roll;
+    // HOTAS pitch convention: push forward (W, pitch+) = nose down. (No yaw.)
+    const wishX = -c.pitch, wishZ = -c.roll;
 
     // S-foils set the trade-off: open = attack (agile, no sublight); folded =
     // cruise (sublight accelerator available, but less maneuverable).
@@ -153,29 +150,20 @@ export class PlayerShip {
     this.inAtmo = atmo > 0.02;
     this.stalled = atmo > 0.1 && aoa > STALL_AOA && sp0 < CORNER_SPEED * 1.2;
 
-    // --- Rotation ---
-    // In air, the achievable pitch/yaw rate is capped by structural G at speed
-    // and by available lift at low speed (you need airspeed to turn). In vacuum
-    // the RCS gives the full rate. Roll is unaffected.
-    let rateX = MAX_RATE.x, rateY = MAX_RATE.y;
+    // --- Rotation (pitch + roll only; no yaw) ---
+    // In air, the pitch rate is capped by structural G at speed and by available
+    // lift at low speed. In vacuum the RCS gives the full rate. Rate-commanded
+    // (snappy, stops when you release the stick).
+    let rateX = MAX_RATE.x;
     if (atmo > 0) {
       const speedF = Math.min(1, sp0 / CORNER_SPEED) * (this.stalled ? 0.25 : 1);
       const gRate = (G_LIMIT * G_ACCEL) / Math.max(50, sp0); // structural-G rate cap
-      const airX = Math.min(MAX_RATE.x, gRate) * speedF;
-      const airY = Math.min(MAX_RATE.y, gRate) * speedF;
-      rateX = MAX_RATE.x * (1 - atmo) + airX * atmo;
-      rateY = MAX_RATE.y * (1 - atmo) + airY * atmo;
+      rateX = MAX_RATE.x * (1 - atmo) + Math.min(MAX_RATE.x, gRate) * speedF * atmo;
     }
-    if (this.flightAssist) {
-      const k = 1 - Math.exp(-dt * 7);
-      this.angVel.x += (wishX * rateX * agility - this.angVel.x) * k;
-      this.angVel.y += (wishY * rateY * agility - this.angVel.y) * k;
-      this.angVel.z += (wishZ * MAX_RATE.z * agility - this.angVel.z) * k;
-    } else {
-      this.angVel.x += wishX * ANG_ACCEL.x * agility * dt;
-      this.angVel.y += wishY * ANG_ACCEL.y * agility * dt;
-      this.angVel.z += wishZ * ANG_ACCEL.z * agility * dt;
-    }
+    const k = 1 - Math.exp(-dt * 7);
+    this.angVel.x += (wishX * rateX * agility - this.angVel.x) * k;
+    this.angVel.y += (0 - this.angVel.y) * k; // yaw removed — damp any residual
+    this.angVel.z += (wishZ * MAX_RATE.z * agility - this.angVel.z) * k;
     // Instantaneous turn G (for the HUD).
     this.gLoad = 1 + Math.hypot(this.angVel.x, this.angVel.y) * sp0 / G_ACCEL;
     const w = this.angVel.length();
@@ -198,8 +186,7 @@ export class PlayerShip {
       //     airspeed, dies in a stall) + THRUST + quadratic DRAG. ---
       const sp = this.vel.length();
       const liftAuth = Math.min(1, sp / CORNER_SPEED) * (this.stalled ? 0.12 : 1);
-      let alignRate = 3.2 * liftAuth;
-      if (this.flightAssist) alignRate = Math.max(alignRate, 1.0);
+      const alignRate = 3.2 * liftAuth;
       if (sp > 1 && alignRate > 0) {
         const dir = this._v.copy(this.vel).divideScalar(sp)
           .lerp(nose, 1 - Math.exp(-dt * alignRate)).normalize();
@@ -208,18 +195,14 @@ export class PlayerShip {
       this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
       const sp2 = this.vel.length();
       this.vel.multiplyScalar(Math.max(0, 1 - AIR_DRAG * atmo * (sp2 / DRAG_REF) * dt));
-    } else if (this.flightAssist) {
-      // --- Space fly-by-wire (RCS): the THROTTLE SETS YOUR SPEED. The thrusters
-      //     drive your velocity toward nose × (throttle·cruise), so easing the
-      //     throttle DECELERATES you and you also fly where you point. Boost
-      //     overrides to max. (Toggle assist OFF for pure Newtonian coasting.)
+    } else {
+      // --- SPACE: the THROTTLE SETS YOUR SPEED. Velocity eases toward
+      //     nose × (throttle·cruise): raise the throttle to accelerate, pull it
+      //     back to decelerate; hold it steady and you COAST (no drag — you only
+      //     slow when you move the throttle). You fly where you point. Boost = max.
       const target = boost ? BOOST_SPEED : c.throttle * CRUISE_SPEED;
       const desired = this._v.copy(nose).multiplyScalar(target);
       this.vel.lerp(desired, 1 - Math.exp(-dt * 2.0));
-    } else {
-      // --- Pure Newtonian: thrust along the nose, momentum otherwise conserved
-      //     (no auto-deceleration — turn around and burn to slow down). ---
-      this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
     }
     this.group.position.addScaledVector(this.vel, dt);
 

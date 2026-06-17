@@ -224,8 +224,8 @@ export function buildCockpit(): Cockpit {
   };
   // Combat row + systems row. (FIRE = stick trigger, GEAR = lever, VTOL = dial.)
   const BANK: [string, string][] = [
-    ["SFOIL", "S-FOIL"], ["ASSIST", "ASSIST"], ["TARGET", "TARGET"],
-    ["AUTO", "AUTO"], ["BOMB", "BOMB"], ["VIEW", "VIEW"],
+    ["SFOIL", "S-FOIL"], ["TARGET", "TARGET"], ["AUTO", "AUTO"],
+    ["BOMB", "BOMB"], ["VIEW", "VIEW"],
   ];
   BANK.forEach(([id, label], i) => mkButton(id, label, i % 3, Math.floor(i / 3)));
 

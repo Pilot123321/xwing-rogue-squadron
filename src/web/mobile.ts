@@ -129,12 +129,6 @@ export function setupMobileControls(input: InputManager): void {
   // BOOST (hold) — sublight accelerator.
   holdBtn("BOOST", { right: "210px", bottom: "60px", width: "78px", height: "60px" },
     () => { input.touch.boost = true; }, () => { input.touch.boost = false; }, "#46d8ff");
-  // Yaw paddles (hold), flanking the joystick.
-  holdBtn("◄ YAW", { left: "180px", bottom: "30px", width: "66px", height: "52px" },
-    () => { input.touch.yaw = -1; }, () => { input.touch.yaw = 0; });
-  holdBtn("YAW ►", { left: "180px", bottom: "92px", width: "66px", height: "52px" },
-    () => { input.touch.yaw = 1; }, () => { input.touch.yaw = 0; });
-
   // Tap actions — right column.
   tapBtn("LOCK\nTGT", { right: "20px", bottom: "250px", width: "70px", height: "56px" }, () => input.onTarget?.());
   tapBtn("BOMB", { right: "20px", bottom: "314px", width: "70px", height: "56px" }, () => input.onBomb?.());
@@ -143,7 +137,6 @@ export function setupMobileControls(input: InputManager): void {
   // Toggle switches — top-right column (visual on/off state).
   const toggles: { label: string; fn: () => void; getOn?: () => boolean }[] = [
     { label: "S-FOIL", fn: () => input.onSFoils?.() },
-    { label: "ASSIST", fn: () => input.onFlightAssist?.() },
     { label: "GEAR", fn: () => input.onGear?.() },
     { label: "VTOL", fn: () => input.onVtol?.() },
     { label: "AUTO", fn: () => input.onAutoLock?.() },

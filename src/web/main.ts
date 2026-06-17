@@ -39,7 +39,6 @@ input.onBomb = () => scene.launchBomb();
 input.onTarget = () => scene.cycleTarget();
 input.onSFoils = () => scene.toggleSFoils();
 input.onView = () => scene.toggleView();
-input.onFlightAssist = () => scene.toggleFlightAssist();
 input.onGear = () => scene.toggleGear();
 input.onVtol = () => scene.toggleVtol();
 input.onAutoLock = () => scene.toggleAutoLock();

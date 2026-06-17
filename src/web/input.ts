@@ -34,7 +34,6 @@ export class InputManager {
   // Smoothed (ramped) keyboard axes — gives an analog feel from on/off keys.
   private smPitch = 0;
   private smRoll = 0;
-  private smYaw = 0;
 
   // Touch / on-screen controls (set by the mobile UI). Axes are -1..1, throttle
   // is absolute 0..1 (or null to leave keyboard in charge), gun/boost are held.
@@ -50,7 +49,6 @@ export class InputManager {
   onTarget: (() => void) | null = null;
   onView: (() => void) | null = null;
   onSFoils: (() => void) | null = null;
-  onFlightAssist: (() => void) | null = null;
   onGear: (() => void) | null = null;
   onVtol: (() => void) | null = null;
   onAutoLock: (() => void) | null = null;
@@ -70,7 +68,6 @@ export class InputManager {
         if (k === "y") this.onAutoLock?.();
         if (k === "x") this.onSFoils?.();
         if (k === "v") this.onView?.();
-        if (k === "g") this.onFlightAssist?.();
         if (k === "l") this.onGear?.();
         if (k === "h") this.onVtol?.();
       }
@@ -90,22 +87,19 @@ export class InputManager {
     if (this.k("control", "ctrl")) this.throttle = Math.max(0, this.throttle - 0.6 * dt);
 
     // --- Keyboard: ramp toward the key target instead of snapping to ±1, so it
-    // feels analog (smooth) rather than twitchy. Decays back to centre on release. ---
-    let kp = 0, kr = 0, ky = 0;
+    // feels analog (smooth) rather than twitchy. Decays back to centre on release.
+    // Pitch + roll only (no yaw). ---
+    let kp = 0, kr = 0;
     if (this.k("w", "arrowup")) kp += 1;
     if (this.k("s", "arrowdown")) kp -= 1;
     if (this.k("d", "arrowright")) kr += 1;
     if (this.k("a", "arrowleft")) kr -= 1;
-    if (this.k("e")) ky += 1;
-    if (this.k("q")) ky -= 1;
     const ramp = 1 - Math.exp(-dt * KEY_RAMP);
     this.smPitch += (kp - this.smPitch) * ramp;
     this.smRoll += (kr - this.smRoll) * ramp;
-    this.smYaw += (ky - this.smYaw) * ramp;
     if (Math.abs(this.smPitch) < 0.002) this.smPitch = 0;
     if (Math.abs(this.smRoll) < 0.002) this.smRoll = 0;
-    if (Math.abs(this.smYaw) < 0.002) this.smYaw = 0;
-    let pitch = this.smPitch, roll = this.smRoll, yaw = this.smYaw;
+    let pitch = this.smPitch, roll = this.smRoll;
     let boost = this.k("z");
 
     // --- Gamepad: deadzone + EXPO curve (gentle near centre, full at the edge)
@@ -116,10 +110,8 @@ export class InputManager {
       const dz = (v: number) => (Math.abs(v) < 0.08 ? 0 : v);
       const gpRoll = dz(pad.axes[0] ?? 0);
       const gpPitch = dz(pad.axes[1] ?? 0);
-      const gpYaw = dz(pad.axes[2] ?? 0);
       if (gpRoll) roll = expo(gpRoll);
       if (gpPitch) pitch = expo(-gpPitch);
-      if (gpYaw) yaw = expo(gpYaw);
       if (pad.buttons[7]?.pressed) boost = true;
     }
 
@@ -127,7 +119,6 @@ export class InputManager {
     if (this.touch.active) {
       if (this.touch.pitch) pitch = expo(this.touch.pitch);
       if (this.touch.roll) roll = expo(this.touch.roll);
-      if (this.touch.yaw) yaw = expo(this.touch.yaw);
       if (this.touch.boost) boost = true;
       if (this.touch.throttle != null) this.throttle = this.touch.throttle;
     }
@@ -135,7 +126,7 @@ export class InputManager {
     return {
       pitch: Math.max(-1, Math.min(1, pitch)),
       roll: Math.max(-1, Math.min(1, roll)),
-      yaw: Math.max(-1, Math.min(1, yaw)),
+      yaw: 0, // yaw removed
       throttle: this.throttle,
       boost,
     };

@@ -806,7 +806,6 @@ var VTOL_SPEED = 130;
 var MAIN_ACCEL = 70;
 var BOOST_ACCEL = 230;
 var RCS_LIN = 60;
-var ANG_ACCEL = new THREE6.Vector3(2.4, 1.4, 4.8);
 var MAX_RATE = new THREE6.Vector3(1.3, 0.85, 3);
 var DEG = Math.PI / 180;
 var ONSPEED_AOA = 8.1 * DEG;
@@ -823,7 +822,6 @@ var PlayerShip = class {
   vel = new THREE6.Vector3(0, 0, -200);
   /** Angular velocity in the body frame (rad/s). Persists when assist is off. */
   angVel = new THREE6.Vector3();
-  flightAssist = true;
   /** True when the sublight accelerator actually engaged this frame. */
   boosting = false;
   gearDown = false;
@@ -854,9 +852,6 @@ var PlayerShip = class {
   }
   get sfoilsOpen() {
     return this.sfoilsTarget > 0.5;
-  }
-  toggleFlightAssist() {
-    this.flightAssist = !this.flightAssist;
   }
   toggleGear() {
     this.gearDown = !this.gearDown;
@@ -891,7 +886,7 @@ var PlayerShip = class {
     return this.model.cannonTips.map((p) => p.clone().applyQuaternion(this.group.quaternion).add(this.group.position));
   }
   update(c, dt, atmo = 0) {
-    const wishX = -c.pitch, wishY = -c.yaw, wishZ = -c.roll;
+    const wishX = -c.pitch, wishZ = -c.roll;
     const wingsFolded = this.sfoils < 0.3;
     const boost = c.boost && wingsFolded;
     this.boosting = boost;
@@ -903,25 +898,16 @@ var PlayerShip = class {
     this.aoaDeg = aoa / DEG;
     this.inAtmo = atmo > 0.02;
     this.stalled = atmo > 0.1 && aoa > STALL_AOA && sp0 < CORNER_SPEED * 1.2;
-    let rateX = MAX_RATE.x, rateY = MAX_RATE.y;
+    let rateX = MAX_RATE.x;
     if (atmo > 0) {
       const speedF = Math.min(1, sp0 / CORNER_SPEED) * (this.stalled ? 0.25 : 1);
       const gRate = G_LIMIT * G_ACCEL / Math.max(50, sp0);
-      const airX = Math.min(MAX_RATE.x, gRate) * speedF;
-      const airY = Math.min(MAX_RATE.y, gRate) * speedF;
-      rateX = MAX_RATE.x * (1 - atmo) + airX * atmo;
-      rateY = MAX_RATE.y * (1 - atmo) + airY * atmo;
+      rateX = MAX_RATE.x * (1 - atmo) + Math.min(MAX_RATE.x, gRate) * speedF * atmo;
     }
-    if (this.flightAssist) {
-      const k = 1 - Math.exp(-dt * 7);
-      this.angVel.x += (wishX * rateX * agility - this.angVel.x) * k;
-      this.angVel.y += (wishY * rateY * agility - this.angVel.y) * k;
-      this.angVel.z += (wishZ * MAX_RATE.z * agility - this.angVel.z) * k;
-    } else {
-      this.angVel.x += wishX * ANG_ACCEL.x * agility * dt;
-      this.angVel.y += wishY * ANG_ACCEL.y * agility * dt;
-      this.angVel.z += wishZ * ANG_ACCEL.z * agility * dt;
-    }
+    const k = 1 - Math.exp(-dt * 7);
+    this.angVel.x += (wishX * rateX * agility - this.angVel.x) * k;
+    this.angVel.y += (0 - this.angVel.y) * k;
+    this.angVel.z += (wishZ * MAX_RATE.z * agility - this.angVel.z) * k;
     this.gLoad = 1 + Math.hypot(this.angVel.x, this.angVel.y) * sp0 / G_ACCEL;
     const w = this.angVel.length();
     if (w > 1e-6) {
@@ -939,8 +925,7 @@ var PlayerShip = class {
     } else if (atmo > 0) {
       const sp = this.vel.length();
       const liftAuth = Math.min(1, sp / CORNER_SPEED) * (this.stalled ? 0.12 : 1);
-      let alignRate = 3.2 * liftAuth;
-      if (this.flightAssist) alignRate = Math.max(alignRate, 1);
+      const alignRate = 3.2 * liftAuth;
       if (sp > 1 && alignRate > 0) {
         const dir = this._v.copy(this.vel).divideScalar(sp).lerp(nose, 1 - Math.exp(-dt * alignRate)).normalize();
         this.vel.copy(dir).multiplyScalar(sp);
@@ -948,12 +933,10 @@ var PlayerShip = class {
       this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
       const sp2 = this.vel.length();
       this.vel.multiplyScalar(Math.max(0, 1 - AIR_DRAG * atmo * (sp2 / DRAG_REF) * dt));
-    } else if (this.flightAssist) {
+    } else {
       const target = boost ? BOOST_SPEED : c.throttle * CRUISE_SPEED;
       const desired = this._v.copy(nose).multiplyScalar(target);
       this.vel.lerp(desired, 1 - Math.exp(-dt * 2));
-    } else {
-      this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
     }
     this.group.position.addScaledVector(this.vel, dt);
     this.sfoils += (this.sfoilsTarget - this.sfoils) * (1 - Math.exp(-dt * 6));
@@ -1427,7 +1410,6 @@ function buildCockpit() {
   };
   const BANK = [
     ["SFOIL", "S-FOIL"],
-    ["ASSIST", "ASSIST"],
     ["TARGET", "TARGET"],
     ["AUTO", "AUTO"],
     ["BOMB", "BOMB"],
@@ -1989,7 +1971,6 @@ var Scene3D = class {
       laserHeat: 0,
       boost: 0,
       view: this.view,
-      flightAssist: true,
       blips: [],
       radarRange: this.RADAR_RANGE
     };
@@ -2259,9 +2240,6 @@ var Scene3D = class {
       case "SFOIL":
         this.toggleSFoils();
         break;
-      case "ASSIST":
-        this.toggleFlightAssist();
-        break;
       case "TARGET":
         this.cycleTarget();
         break;
@@ -2376,9 +2354,6 @@ var Scene3D = class {
   toggleAutoLock() {
     this.autoLock = !this.autoLock;
     this.flash(this.autoLock ? "AUTO TARGET ON" : "MANUAL TARGET (T)", 1.5);
-  }
-  toggleFlightAssist() {
-    this.player.toggleFlightAssist();
   }
   pushFeed(text, color) {
     this.feed.push({ text, color, until: this.clock.getElapsedTime() + 4.5 });
@@ -2523,7 +2498,6 @@ var Scene3D = class {
     if (this.hardLock && !this.prevHardLock) this.onLock?.();
     this.prevHardLock = this.hardLock;
     this.cockpit.setIndicator("SFOIL", this.player.sfoilsOpen);
-    this.cockpit.setIndicator("ASSIST", this.player.flightAssist);
     this.cockpit.setIndicator("GEAR", this.player.gearDown);
     this.cockpit.setIndicator("AUTO", this.autoLock);
     this.cockpit.setGearLever(this.player.gearDown);
@@ -2597,7 +2571,6 @@ var Scene3D = class {
     const h = this.hud;
     h.speed = this.player.speed;
     h.throttle = this.lastThrottle;
-    h.flightAssist = this.player.flightAssist;
     h.hull = Math.max(0, Math.round(this.hull));
     h.shields = 0;
     h.score = this.score;
@@ -2992,10 +2965,6 @@ var HUD = class {
     ctx.strokeRect(tx, ty, tW, 12);
     ctx.fillRect(tx, ty, tW * Math.max(0, Math.min(1, d.throttle)), 12);
     ctx.fillText(`THR ${Math.round(d.throttle * 100)}%   ${Math.round(d.speed)} m/s   S-FOILS ${d.sfoils ? "ATTACK" : "CRUISE"}`, cx, ty - 14);
-    ctx.fillStyle = d.flightAssist ? CYAN : RED2;
-    ctx.font = "bold 14px monospace";
-    ctx.fillText(`FLIGHT ASSIST ${d.flightAssist ? "ON" : "OFF \u2014 NEWTONIAN"}`, cx, ty + 24);
-    ctx.font = "15px monospace";
     const states = [];
     if (d.gear) states.push("GEAR DOWN");
     if (d.vtol) states.push("VTOL");
@@ -3444,7 +3413,6 @@ var InputManager = class {
   // Smoothed (ramped) keyboard axes — gives an analog feel from on/off keys.
   smPitch = 0;
   smRoll = 0;
-  smYaw = 0;
   // Touch / on-screen controls (set by the mobile UI). Axes are -1..1, throttle
   // is absolute 0..1 (or null to leave keyboard in charge), gun/boost are held.
   touch = {
@@ -3461,7 +3429,6 @@ var InputManager = class {
   onTarget = null;
   onView = null;
   onSFoils = null;
-  onFlightAssist = null;
   onGear = null;
   onVtol = null;
   onAutoLock = null;
@@ -3483,7 +3450,6 @@ var InputManager = class {
         if (k === "y") this.onAutoLock?.();
         if (k === "x") this.onSFoils?.();
         if (k === "v") this.onView?.();
-        if (k === "g") this.onFlightAssist?.();
         if (k === "l") this.onGear?.();
         if (k === "h") this.onVtol?.();
       }
@@ -3502,21 +3468,17 @@ var InputManager = class {
   sample(dt) {
     if (this.k("shift")) this.throttle = Math.min(1, this.throttle + 0.6 * dt);
     if (this.k("control", "ctrl")) this.throttle = Math.max(0, this.throttle - 0.6 * dt);
-    let kp = 0, kr = 0, ky = 0;
+    let kp = 0, kr = 0;
     if (this.k("w", "arrowup")) kp += 1;
     if (this.k("s", "arrowdown")) kp -= 1;
     if (this.k("d", "arrowright")) kr += 1;
     if (this.k("a", "arrowleft")) kr -= 1;
-    if (this.k("e")) ky += 1;
-    if (this.k("q")) ky -= 1;
     const ramp = 1 - Math.exp(-dt * KEY_RAMP);
     this.smPitch += (kp - this.smPitch) * ramp;
     this.smRoll += (kr - this.smRoll) * ramp;
-    this.smYaw += (ky - this.smYaw) * ramp;
     if (Math.abs(this.smPitch) < 2e-3) this.smPitch = 0;
     if (Math.abs(this.smRoll) < 2e-3) this.smRoll = 0;
-    if (Math.abs(this.smYaw) < 2e-3) this.smYaw = 0;
-    let pitch = this.smPitch, roll = this.smRoll, yaw = this.smYaw;
+    let pitch = this.smPitch, roll = this.smRoll;
     let boost = this.k("z");
     const pads = navigator.getGamepads?.() ?? [];
     const pad = pads.find((p) => p);
@@ -3524,23 +3486,21 @@ var InputManager = class {
       const dz = (v) => Math.abs(v) < 0.08 ? 0 : v;
       const gpRoll = dz(pad.axes[0] ?? 0);
       const gpPitch = dz(pad.axes[1] ?? 0);
-      const gpYaw = dz(pad.axes[2] ?? 0);
       if (gpRoll) roll = expo(gpRoll);
       if (gpPitch) pitch = expo(-gpPitch);
-      if (gpYaw) yaw = expo(gpYaw);
       if (pad.buttons[7]?.pressed) boost = true;
     }
     if (this.touch.active) {
       if (this.touch.pitch) pitch = expo(this.touch.pitch);
       if (this.touch.roll) roll = expo(this.touch.roll);
-      if (this.touch.yaw) yaw = expo(this.touch.yaw);
       if (this.touch.boost) boost = true;
       if (this.touch.throttle != null) this.throttle = this.touch.throttle;
     }
     return {
       pitch: Math.max(-1, Math.min(1, pitch)),
       roll: Math.max(-1, Math.min(1, roll)),
-      yaw: Math.max(-1, Math.min(1, yaw)),
+      yaw: 0,
+      // yaw removed
       throttle: this.throttle,
       boost
     };
@@ -3817,32 +3777,11 @@ function setupMobileControls(input2) {
     },
     "#46d8ff"
   );
-  holdBtn(
-    "\u25C4 YAW",
-    { left: "180px", bottom: "30px", width: "66px", height: "52px" },
-    () => {
-      input2.touch.yaw = -1;
-    },
-    () => {
-      input2.touch.yaw = 0;
-    }
-  );
-  holdBtn(
-    "YAW \u25BA",
-    { left: "180px", bottom: "92px", width: "66px", height: "52px" },
-    () => {
-      input2.touch.yaw = 1;
-    },
-    () => {
-      input2.touch.yaw = 0;
-    }
-  );
   tapBtn("LOCK\nTGT", { right: "20px", bottom: "250px", width: "70px", height: "56px" }, () => input2.onTarget?.());
   tapBtn("BOMB", { right: "20px", bottom: "314px", width: "70px", height: "56px" }, () => input2.onBomb?.());
   tapBtn("VIEW", { right: "20px", bottom: "378px", width: "70px", height: "56px" }, () => input2.onView?.());
   const toggles = [
     { label: "S-FOIL", fn: () => input2.onSFoils?.() },
-    { label: "ASSIST", fn: () => input2.onFlightAssist?.() },
     { label: "GEAR", fn: () => input2.onGear?.() },
     { label: "VTOL", fn: () => input2.onVtol?.() },
     { label: "AUTO", fn: () => input2.onAutoLock?.() }
@@ -3885,7 +3824,6 @@ input.onBomb = () => scene.launchBomb();
 input.onTarget = () => scene.cycleTarget();
 input.onSFoils = () => scene.toggleSFoils();
 input.onView = () => scene.toggleView();
-input.onFlightAssist = () => scene.toggleFlightAssist();
 input.onGear = () => scene.toggleGear();
 input.onVtol = () => scene.toggleVtol();
 input.onAutoLock = () => scene.toggleAutoLock();

@@ -43,7 +43,6 @@ export interface HudData {
   laserHeat: number; // 0..1
   boost: number; // 0..1 sublight accelerator engaged
   view: ViewMode;
-  flightAssist: boolean;
   blips: Blip[]; // radar contacts (player-local, normalized)
   radarRange: number;
   // Realistic gunnery markers (screen px). prograde = velocity vector;
@@ -307,7 +306,7 @@ export class Scene3D {
     return {
       speed: 0, throttle: 0, maxSpeed: MAX_SPEED, hull: 100, shields: 100,
       score: 0, wave: 1, lives: 3, enemiesLeft: 0, sfoils: true, torps: 8,
-      laserHeat: 0, boost: 0, view: this.view, flightAssist: true,
+      laserHeat: 0, boost: 0, view: this.view,
       blips: [], radarRange: this.RADAR_RANGE,
     };
   }
@@ -587,7 +586,6 @@ export class Scene3D {
     this.onCockpitClick?.();
     switch (id) {
       case "SFOIL": this.toggleSFoils(); break;
-      case "ASSIST": this.toggleFlightAssist(); break;
       case "TARGET": this.cycleTarget(); break;
       case "FIRE": this.firePrimary(); break;
       case "VIEW": this.toggleView(); break;
@@ -692,7 +690,6 @@ export class Scene3D {
     this.flash(this.autoLock ? "AUTO TARGET ON" : "MANUAL TARGET (T)", 1.5);
   }
 
-  toggleFlightAssist(): void { this.player.toggleFlightAssist(); }
 
   private pushFeed(text: string, color: string): void {
     this.feed.push({ text, color, until: this.clock.getElapsedTime() + 4.5 });
@@ -879,7 +876,6 @@ export class Scene3D {
 
     // Cockpit indicator lights + button press animation.
     this.cockpit.setIndicator("SFOIL", this.player.sfoilsOpen);
-    this.cockpit.setIndicator("ASSIST", this.player.flightAssist);
     this.cockpit.setIndicator("GEAR", this.player.gearDown);
     this.cockpit.setIndicator("AUTO", this.autoLock); // lit = auto target acquire
     this.cockpit.setGearLever(this.player.gearDown);
@@ -962,7 +958,6 @@ export class Scene3D {
     const h = this.hud;
     h.speed = this.player.speed;
     h.throttle = this.lastThrottle;
-    h.flightAssist = this.player.flightAssist;
     h.hull = Math.max(0, Math.round(this.hull));
     h.shields = 0;
     h.score = this.score;
