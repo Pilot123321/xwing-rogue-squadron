@@ -1318,6 +1318,25 @@ function buildCockpit() {
   bezel.position.copy(scope.position);
   bezel.rotation.x = -0.5;
   group.add(bezel);
+  const mkLight = (x, label, offHex) => {
+    const m = new THREE9.Mesh(
+      new THREE9.BoxGeometry(0.26, 0.1, 0.04),
+      new THREE9.MeshBasicMaterial({ color: offHex })
+    );
+    m.position.set(x, 0.78, -2.4);
+    m.rotation.x = -0.35;
+    group.add(m);
+    const lab = new THREE9.Mesh(
+      new THREE9.PlaneGeometry(0.24, 0.08),
+      new THREE9.MeshBasicMaterial({ map: makeLabel(label) })
+    );
+    lab.position.set(x, 0.78, -2.378);
+    lab.rotation.x = -0.35;
+    group.add(lab);
+    return m;
+  };
+  const lockLight = mkLight(-0.18, "LOCK", 3813400);
+  const shootLight = mkLight(0.18, "SHOOT", 3806228);
   let tvScreen;
   for (const sx of [-1, 1]) {
     const frame2 = new THREE9.Mesh(new THREE9.BoxGeometry(0.46, 0.56, 0.04), FRAME);
@@ -1504,6 +1523,11 @@ function buildCockpit() {
     },
     setVtolDial(on) {
       vtolPtr.rotation.z = on ? -1 : 1;
+    },
+    setLockShoot(lock, shoot) {
+      lockLight.material.color.setHex(lock ? 16758311 : 3813400);
+      const flash = shoot && Math.floor(performance.now() / 150) % 2 === 0;
+      shootLight.material.color.setHex(flash ? 3407701 : 3806228);
     },
     setIndicator(id, on) {
       const light = lights.get(id);
@@ -2504,6 +2528,7 @@ var Scene3D = class {
     this.cockpit.setIndicator("AUTO", this.autoLock);
     this.cockpit.setGearLever(this.player.gearDown);
     this.cockpit.setVtolDial(this.player.vtol);
+    this.cockpit.setLockShoot(this.hardLock, !!this.hud.shoot);
     this.cockpit.update(performance.now());
     if (this.remotes.size) {
       const k = 1 - Math.exp(-dt * 10);
@@ -3408,9 +3433,18 @@ var AudioEngine = class {
 };
 
 // src/web/input.ts
+var KEY_RAMP = 9;
+var EXPO = 0.55;
+function expo(v) {
+  return EXPO * v * v * v + (1 - EXPO) * v;
+}
 var InputManager = class {
   keys = /* @__PURE__ */ new Set();
   throttle = 0.55;
+  // Smoothed (ramped) keyboard axes — gives an analog feel from on/off keys.
+  smPitch = 0;
+  smRoll = 0;
+  smYaw = 0;
   // Touch / on-screen controls (set by the mobile UI). Axes are -1..1, throttle
   // is absolute 0..1 (or null to leave keyboard in charge), gun/boost are held.
   touch = {
@@ -3468,13 +3502,21 @@ var InputManager = class {
   sample(dt) {
     if (this.k("shift")) this.throttle = Math.min(1, this.throttle + 0.6 * dt);
     if (this.k("control", "ctrl")) this.throttle = Math.max(0, this.throttle - 0.6 * dt);
-    let pitch = 0, roll = 0, yaw = 0;
-    if (this.k("w", "arrowup")) pitch += 1;
-    if (this.k("s", "arrowdown")) pitch -= 1;
-    if (this.k("d", "arrowright")) roll += 1;
-    if (this.k("a", "arrowleft")) roll -= 1;
-    if (this.k("e")) yaw += 1;
-    if (this.k("q")) yaw -= 1;
+    let kp = 0, kr = 0, ky = 0;
+    if (this.k("w", "arrowup")) kp += 1;
+    if (this.k("s", "arrowdown")) kp -= 1;
+    if (this.k("d", "arrowright")) kr += 1;
+    if (this.k("a", "arrowleft")) kr -= 1;
+    if (this.k("e")) ky += 1;
+    if (this.k("q")) ky -= 1;
+    const ramp = 1 - Math.exp(-dt * KEY_RAMP);
+    this.smPitch += (kp - this.smPitch) * ramp;
+    this.smRoll += (kr - this.smRoll) * ramp;
+    this.smYaw += (ky - this.smYaw) * ramp;
+    if (Math.abs(this.smPitch) < 2e-3) this.smPitch = 0;
+    if (Math.abs(this.smRoll) < 2e-3) this.smRoll = 0;
+    if (Math.abs(this.smYaw) < 2e-3) this.smYaw = 0;
+    let pitch = this.smPitch, roll = this.smRoll, yaw = this.smYaw;
     let boost = this.k("z");
     const pads = navigator.getGamepads?.() ?? [];
     const pad = pads.find((p) => p);
@@ -3483,15 +3525,15 @@ var InputManager = class {
       const gpRoll = dz(pad.axes[0] ?? 0);
       const gpPitch = dz(pad.axes[1] ?? 0);
       const gpYaw = dz(pad.axes[2] ?? 0);
-      if (gpRoll) roll = gpRoll;
-      if (gpPitch) pitch = -gpPitch;
-      if (gpYaw) yaw = gpYaw;
+      if (gpRoll) roll = expo(gpRoll);
+      if (gpPitch) pitch = expo(-gpPitch);
+      if (gpYaw) yaw = expo(gpYaw);
       if (pad.buttons[7]?.pressed) boost = true;
     }
     if (this.touch.active) {
-      if (this.touch.pitch) pitch = this.touch.pitch;
-      if (this.touch.roll) roll = this.touch.roll;
-      if (this.touch.yaw) yaw = this.touch.yaw;
+      if (this.touch.pitch) pitch = expo(this.touch.pitch);
+      if (this.touch.roll) roll = expo(this.touch.roll);
+      if (this.touch.yaw) yaw = expo(this.touch.yaw);
       if (this.touch.boost) boost = true;
       if (this.touch.throttle != null) this.throttle = this.touch.throttle;
     }
