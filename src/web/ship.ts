@@ -193,41 +193,33 @@ export class PlayerShip {
       const maxDV = (MAIN_ACCEL + RCS_LIN) * dt;
       if (dv.length() > maxDV) dv.setLength(maxDV);
       this.vel.add(dv);
-    } else {
+    } else if (atmo > 0) {
+      // --- Atmospheric: aerodynamic LIFT (flight path follows nose, needs
+      //     airspeed, dies in a stall) + THRUST + quadratic DRAG. ---
       const sp = this.vel.length();
-
-      // 1) FLIGHT PATH follows the nose. In space this is the RCS (flight assist)
-      //    realign; in air it's aerodynamic LIFT, which needs airspeed and dies
-      //    in a stall. Newtonian-in-space keeps pure momentum (no realign).
-      let alignRate = 0;
-      if (atmo > 0) {
-        const liftAuth = Math.min(1, sp / CORNER_SPEED) * (this.stalled ? 0.12 : 1);
-        alignRate = 3.2 * liftAuth; // aerodynamic lift
-        if (this.flightAssist) alignRate = Math.max(alignRate, 1.0); // RCS assist helps a bit
-      } else if (this.flightAssist) {
-        alignRate = 2.6; // space RCS
-      }
+      const liftAuth = Math.min(1, sp / CORNER_SPEED) * (this.stalled ? 0.12 : 1);
+      let alignRate = 3.2 * liftAuth;
+      if (this.flightAssist) alignRate = Math.max(alignRate, 1.0);
       if (sp > 1 && alignRate > 0) {
         const dir = this._v.copy(this.vel).divideScalar(sp)
           .lerp(nose, 1 - Math.exp(-dt * alignRate)).normalize();
-        this.vel.copy(dir).multiplyScalar(sp); // redirect, preserve speed (gravity adds energy separately)
+        this.vel.copy(dir).multiplyScalar(sp);
       }
-
-      // 2) THRUST along the nose.
-      const accel = boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL;
-      this.vel.addScaledVector(nose, accel * dt);
-
-      // 3) Speed limiting: in AIR, quadratic drag sets the thrust-vs-airspeed top
-      //    speed (and bleeds energy when you chop throttle / in hard turns). In
-      //    SPACE, a soft cap under flight assist; pure coast when assist is off.
+      this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
       const sp2 = this.vel.length();
-      if (atmo > 0) {
-        const drag = AIR_DRAG * atmo * (sp2 / DRAG_REF);
-        this.vel.multiplyScalar(Math.max(0, 1 - drag * dt));
-      } else if (this.flightAssist && !boost) {
-        const cap = CRUISE_SPEED * 1.03;
-        if (sp2 > cap) this.vel.multiplyScalar(cap / sp2);
-      }
+      this.vel.multiplyScalar(Math.max(0, 1 - AIR_DRAG * atmo * (sp2 / DRAG_REF) * dt));
+    } else if (this.flightAssist) {
+      // --- Space fly-by-wire (RCS): the THROTTLE SETS YOUR SPEED. The thrusters
+      //     drive your velocity toward nose × (throttle·cruise), so easing the
+      //     throttle DECELERATES you and you also fly where you point. Boost
+      //     overrides to max. (Toggle assist OFF for pure Newtonian coasting.)
+      const target = boost ? BOOST_SPEED : c.throttle * CRUISE_SPEED;
+      const desired = this._v.copy(nose).multiplyScalar(target);
+      this.vel.lerp(desired, 1 - Math.exp(-dt * 2.0));
+    } else {
+      // --- Pure Newtonian: thrust along the nose, momentum otherwise conserved
+      //     (no auto-deceleration — turn around and burn to slow down). ---
+      this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
     }
     this.group.position.addScaledVector(this.vel, dt);
 

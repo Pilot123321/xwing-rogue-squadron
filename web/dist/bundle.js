@@ -801,6 +801,7 @@ function buildXWing() {
 var FORWARD2 = new THREE6.Vector3(0, 0, -1);
 var CRUISE_SPEED = 480;
 var MAX_SPEED = CRUISE_SPEED;
+var BOOST_SPEED = 1100;
 var VTOL_SPEED = 130;
 var MAIN_ACCEL = 70;
 var BOOST_ACCEL = 230;
@@ -935,30 +936,24 @@ var PlayerShip = class {
       const maxDV = (MAIN_ACCEL + RCS_LIN) * dt;
       if (dv.length() > maxDV) dv.setLength(maxDV);
       this.vel.add(dv);
-    } else {
+    } else if (atmo > 0) {
       const sp = this.vel.length();
-      let alignRate = 0;
-      if (atmo > 0) {
-        const liftAuth = Math.min(1, sp / CORNER_SPEED) * (this.stalled ? 0.12 : 1);
-        alignRate = 3.2 * liftAuth;
-        if (this.flightAssist) alignRate = Math.max(alignRate, 1);
-      } else if (this.flightAssist) {
-        alignRate = 2.6;
-      }
+      const liftAuth = Math.min(1, sp / CORNER_SPEED) * (this.stalled ? 0.12 : 1);
+      let alignRate = 3.2 * liftAuth;
+      if (this.flightAssist) alignRate = Math.max(alignRate, 1);
       if (sp > 1 && alignRate > 0) {
         const dir = this._v.copy(this.vel).divideScalar(sp).lerp(nose, 1 - Math.exp(-dt * alignRate)).normalize();
         this.vel.copy(dir).multiplyScalar(sp);
       }
-      const accel = boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL;
-      this.vel.addScaledVector(nose, accel * dt);
+      this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
       const sp2 = this.vel.length();
-      if (atmo > 0) {
-        const drag = AIR_DRAG * atmo * (sp2 / DRAG_REF);
-        this.vel.multiplyScalar(Math.max(0, 1 - drag * dt));
-      } else if (this.flightAssist && !boost) {
-        const cap = CRUISE_SPEED * 1.03;
-        if (sp2 > cap) this.vel.multiplyScalar(cap / sp2);
-      }
+      this.vel.multiplyScalar(Math.max(0, 1 - AIR_DRAG * atmo * (sp2 / DRAG_REF) * dt));
+    } else if (this.flightAssist) {
+      const target = boost ? BOOST_SPEED : c.throttle * CRUISE_SPEED;
+      const desired = this._v.copy(nose).multiplyScalar(target);
+      this.vel.lerp(desired, 1 - Math.exp(-dt * 2));
+    } else {
+      this.vel.addScaledVector(nose, (boost ? BOOST_ACCEL : c.throttle * MAIN_ACCEL) * dt);
     }
     this.group.position.addScaledVector(this.vel, dt);
     this.sfoils += (this.sfoilsTarget - this.sfoils) * (1 - Math.exp(-dt * 6));
